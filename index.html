@@ -1294,15 +1294,15 @@ function render() {
 
   // 名前・何戦目か
   if (G.net) {
-    const host = G.net.isHost;
-    txt(host ? 'あなた' : '相手', 12 * K, 6 * K, 17, host ? '#ffffff' : '#d8c8c8', 'left');
-    txt(host ? '相手' : 'あなた', 308 * K, 6 * K, 17, host ? '#d8c8c8' : '#ffffff', 'right');
-    txt('フレンド対戦', 160 * K, 6 * K, 17, '#f3d27a', 'center', FONT_SERIF);
+    const left = netMeLeft();
+    txt(left ? 'あなた' : '相手', 12 * K, 6 * K, 17, left ? '#ffffff' : '#d8c8c8', 'left');
+    txt(left ? '相手' : 'あなた', 308 * K, 6 * K, 17, left ? '#d8c8c8' : '#ffffff', 'right');
+    txt(`フレンド対戦　${G.net.round}戦目`, 160 * K, 6 * K, 17, '#f3d27a', 'center', FONT_SERIF);
     txt('体力', 131 * K, 16 * K, 12, '#f2cf2a', 'left'); txt('体幹', 105 * K, 25 * K, 12, '#ff7060', 'left');
     txt('体力', 189 * K, 16 * K, 12, '#f2cf2a', 'right'); txt('体幹', 215 * K, 25 * K, 12, '#ff7060', 'right');
-    // 開始演出中は自分の侍の頭上に「あなた」と表示
-    if (G.mode === 'intro' || (G.mode === 'fight' && G.frame < 60)) {
-      const me = host ? G.p : G.c;
+    // 開始演出中は自分の侍の頭上に「あなた」と表示（再戦ごとに左右が入れ替わるため）
+    if (G.mode === 'intro' || (G.mode === 'fight' && G.frame < 90)) {
+      const me = netMe();
       txt('▼ あなた', me.x * K, (STAGE.GROUND_Y - 62) * K, 15, '#ffe680');
     }
   } else if (G.mode !== 'ending') {
@@ -1349,7 +1349,7 @@ function render() {
     if (G.koT > 24 && G.koT <= 100) txt('決着', cv.width / 2, cv.height / 2 - 40, 90, '#ffffff', 'center', FONT_SERIF, '#000', 12);
     if (G.koT > 100 && G.net) {   // フレンド対戦の結果
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, cv.width, cv.height);
-      const n = G.net, me = n.isHost ? G.p : G.c, win = G.winner === me, W = cv.width;
+      const n = G.net, me = netMe(), win = G.winner === me, W = cv.width;
       txt(win ? '勝利' : '敗北', W / 2, 150, 120, win ? '#ffd860' : '#d83030', 'center', FONT_SERIF, '#000', 14);
       txt(win ? '見事なり。' : '修行が足りぬ……', W / 2, 235, 28, '#f3e6c0', 'center', FONT_SERIF);
       const st = me.stats;
@@ -1850,6 +1850,11 @@ function netPredict() {
   return last & (IN_L | IN_R | IN_G);
 }
 
+// ---- 左右の割り当て：1戦目はホストが左。再戦のたびに必ず入れ替わる ----
+const hostOnLeft = r => r % 2 === 1;
+function netMeLeft() { const n = G.net; return n.isHost === hostOnLeft(n.round); }
+function netMe() { return netMeLeft() ? G.p : G.c; }
+
 // ---- 試合の開始 ----
 function netStartRound(r) {
   const n = G.net;
@@ -1861,8 +1866,10 @@ function netStartRound(r) {
   });
   for (let f = 0; f < NET.INPUT_DELAY; f++) { n.localIn.set(f, 0); n.remoteIn.set(f, 0); } // 最初の数フレームは無入力で確定
   G.stage = 0; G.ai = null; G.lobby = null;
-  G.p = new Fighter(true, MOVE.START_P, PAL_P, '');
-  G.c = new Fighter(false, MOVE.START_C, PAL_C, '');
+  // 左右の割り当て：奇数戦はホスト（青い侍）が左、偶数戦はゲスト（赤い侍）が左。各自の侍の色はそのまま
+  const hl = hostOnLeft(r);
+  G.p = new Fighter(true, MOVE.START_P, hl ? PAL_P : PAL_C, '');
+  G.c = new Fighter(false, MOVE.START_C, hl ? PAL_C : PAL_P, '');
   G.frame = 0; G.hitstop = 0; G.slow = 0; G.paused = false; G.winner = null;
   G.mode = 'intro'; G.introT = 0; G.koT = 0;
   clearFX();
@@ -1875,7 +1882,7 @@ function netStep(f) {
   let rem = n.remoteIn.get(f);
   if (rem === undefined) rem = netPredict();
   n.used.set(f, rem);
-  if (n.isHost) simFrame(loc, rem); else simFrame(rem, loc);
+  if (netMeLeft()) simFrame(loc, rem); else simFrame(rem, loc);
 }
 function sampleLocal() {
   const n = G.net; let b = 0;
