@@ -1483,7 +1483,8 @@ function renderNetStatus() {
   const n = G.net, K = SCREEN.SCALE;
   const ms = Math.round(n.rtt);
   const col = !ms ? '#c8c8c8' : ms < 80 ? '#90e090' : ms < 160 ? '#f0d070' : '#ff8070';
-  txt(`通信 ${ms ? ms + 'ms' : '—'}`, 10, cv.height - 12, 13, col, 'left');
+  const route = n.route === 'direct' ? '・直結' : n.route === 'relay' ? '・中継' : '';
+  txt(`通信 ${ms ? ms + 'ms' : '—'}${route}`, 10, cv.height - 12, 13, col, 'left');
   if (n.stallT > 20) txt('相手の通信を待っています…', cv.width / 2, 120 * K, 22, '#ffe680', 'center', FONT_SERIF);
   if (n.desync) txt('※同期ずれを検出しました', 10, cv.height - 32, 13, '#ff8070', 'left');
 }
@@ -1636,9 +1637,11 @@ function tick() {
      実際の入力が届いて予測が外れていたら、そのフレームまで巻き戻して計算し直す
    ===================================================================== */
 const NET = {
-  VERSION: 1,               // 通信の取り決めの版（違う版同士はつながない）
+  VERSION: 2,               // 通信の取り決めの版（違う版同士はつながない）
   INPUT_DELAY: 2,           // 入力遅延（フレーム）：小さな遅れは巻き戻しなしで吸収する
-  MAX_ROLLBACK: 10,         // 予測で先行できる最大フレーム数（超えたら相手を待つ）
+  MAX_ROLLBACK: 15,         // 予測で先行できる最大フレーム数（超えたら相手を待つ）。Wi-Fiの一瞬の遅れを止まらずに吸収する
+  SEND_MAX: 60,             // 1回の送信に含める入力の最大フレーム数（相手が受け取りを確認していない分をまとめて送る）
+  KEEP_FRAMES: 90,          // 自分の入力の記録を残すフレーム数
   SUM_INTERVAL: 60,         // 同期ずれの確認間隔（フレーム）
   PEER_PREFIX: 'samuraido-mp-',
   CODE_CHARS: 'ABCDEFGHJKMNPQRSTUVWXYZ23456789', // 読み間違えやすい I L O 0 1 は使わない
@@ -1725,7 +1728,8 @@ function peerOptions() {
 }
 function newNet(isHost) {
   return { isHost, peer: null, conn: null, connected: false, inMatch: false, round: 0, shown: new Set(),
-    rtt: 0, lastMsg: performance.now(), pingT: 0, desync: false, rollbacks: 0, stalls: 0, remoteAhead: 0 };
+    rtt: 0, lastMsg: performance.now(), pingT: 0, desync: false, rollbacks: 0, stalls: 0, remoteAhead: 0, route: '',
+    fast: null, fastRecv: 0 };
 }
 function peerErrMsg(err) {
   const t = err && err.type;
@@ -1772,7 +1776,9 @@ function netJoin(code) {
   const peer = n.peer = new Peer(peerOptions());
   peer.on('open', () => {
     if (G.net !== n) return;
-    netAttach(n, peer.connect(NET.PEER_PREFIX + code, { reliable: true, serialization: 'json' }));
+    // reliable:false ＝ 順番待ちをしない送り方。データが1つ欠けても、後続のデータは待たされずにすぐ届く。
+    // 欠けた入力は、次の送信に含まれる「未確認の入力のまとめ」で補われる
+    netAttach(n, peer.connect(NET.PEER_PREFIX + code, { reliable: false, serialization: 'json' }));
   });
   peer.on('error', err => { if (G.net === n && !n.inMatch) lobbyError(peerErrMsg(err)); });
   setTimeout(() => {
@@ -1785,19 +1791,39 @@ function netAttach(n, conn) {
     if (G.net !== n) return;
     n.connected = true; n.lastMsg = performance.now();
     if (G.lobby) G.lobby.phase = 'connected';
+    netOpenFast(n);
     netSend({ t: 'hello', v: NET.VERSION });
+    setTimeout(() => netCheckRoute(n), 1500);
   });
   conn.on('data', msg => { if (G.net === n) netOnMessage(msg); });
   conn.on('close', () => { if (G.net === n) netLost('相手との接続が切れました。'); });
   conn.on('error', () => { if (G.net === n) netLost('通信エラーで接続が切れました。'); });
 }
+// 入力専用の高速チャンネル：再送なし・順番待ちなし。欠けた分は「未確認の入力のまとめ」で補うので再送は不要。
+// （ブラウザの再送は、欠けが続くと待ち時間がどんどん延びるため、入力の送信には使わない）
+// 両者が同じ番号で作る「取り決め済み」チャンネルなので、追加のやり取りなしで開く
+function netOpenFast(n) {
+  const pc = n.conn && n.conn.peerConnection;
+  if (!pc || !pc.createDataChannel) return;
+  try {
+    const ch = pc.createDataChannel('samuraido-inputs', { negotiated: true, id: 100, ordered: false, maxRetransmits: 0 });
+    ch.onmessage = e => { if (G.net !== n) return; try { netOnMessage(JSON.parse(e.data)); n.fastRecv++; } catch (err) { /* 壊れたデータは捨てる */ } };
+    n.fast = ch;
+  } catch (e) { n.fast = null; }   // 作れない環境では通常の経路で送る
+}
 function netSend(msg) {
   const n = G.net;
   if (n && n.conn && n.connected) { try { n.conn.send(msg); } catch (e) { /* 送れなければ切断検出に任せる */ } }
 }
+function netSendFast(msg) {     // 入力など、欠けてもよく速さが大事なデータ
+  const n = G.net;
+  if (n && n.fast && n.fast.readyState === 'open') { try { n.fast.send(JSON.stringify(msg)); return; } catch (e) { /* 通常の経路へ */ } }
+  netSend(msg);
+}
 function netClose() {
   const n = G.net; if (!n) return;
   G.net = null;
+  try { if (n.fast) n.fast.close(); } catch (e) { /* 無視 */ }
   try { if (n.conn) n.conn.close(); } catch (e) { /* 無視 */ }
   try { if (n.peer) n.peer.destroy(); } catch (e) { /* 無視 */ }
 }
@@ -1809,10 +1835,27 @@ function netLost(msg) {                                                  // 相�
 // 定期処理：往復時間の測定と無応答の検出
 function netWatch() {
   const n = G.net;
-  if (++n.pingT % 60 === 0) netSend({ t: 'ping', ts: performance.now() });
+  if (++n.pingT % 60 === 0) netSendFast({ t: 'ping', ts: performance.now() });   // 入力と同じ経路で測る
+  if (n.pingT % 600 === 0) netCheckRoute(n);
+
   if (performance.now() - n.lastMsg > NET.SILENCE_TIMEOUT) netLost('相手からの応答がなくなりました。');
 }
 function hostStart(r) { netSend({ t: 'start', r }); netStartRound(r); }
+// 接続経路の判定：2台が直接つながっている（直結）か、中継サーバー経由（中継）か
+function netCheckRoute(n) {
+  const pc = n && n.conn && n.conn.peerConnection;
+  if (!pc || !pc.getStats) return;
+  pc.getStats().then(stats => {
+    let pairId = null, pair = null;
+    stats.forEach(s => { if (s.type === 'transport' && s.selectedCandidatePairId) pairId = s.selectedCandidatePairId; });
+    stats.forEach(s => {
+      if (s.type === 'candidate-pair' && (pairId ? s.id === pairId : s.nominated && s.state === 'succeeded')) pair = s;
+    });
+    if (!pair) return;
+    const lc = stats.get(pair.localCandidateId), rc = stats.get(pair.remoteCandidateId);
+    n.route = (lc && lc.candidateType === 'relay') || (rc && rc.candidateType === 'relay') ? 'relay' : 'direct';
+  }).catch(() => { /* 取得できなければ表示しない */ });
+}
 
 // ---- 受信 ----
 function netOnMessage(m) {
@@ -1823,26 +1866,42 @@ function netOnMessage(m) {
       if (m.v !== NET.VERSION) { netLost('相手とゲームの版が違います。両方ともページを再読み込みしてください。'); return; }
       if (n.isHost && !n.inMatch && n.round === 0) hostStart(1);
       break;
-    case 'start': if (!n.isHost) netStartRound(m.r); break;
-    case 'i': if (n.inMatch && m.r === n.round) { netOnInput(m.f, m.b); n.remoteAhead = m.a; } break;
+    case 'start': if (!n.isHost && m.r > n.round) netStartRound(m.r); break;
+    case 'i':   // 相手の入力のまとめ：s フレーム目から順に b[] の入力。k は「相手がこちらの入力をどこまで受け取ったか」
+      if (n.inMatch && m.r === n.round) {
+        for (let j = 0; j < m.b.length; j++) netOnInput(m.s + j, m.b[j]);
+        if (m.k > n.ackFromRemote) n.ackFromRemote = m.k;
+        n.remoteAhead = m.a;
+      }
+      break;
     case 'ready':
       if (m.r === n.round) { n.ready.them = true; if (n.isHost && n.ready.me) hostStart(n.round + 1); }
       break;
     case 'sum':
       if (n.inMatch && m.r === n.round) { n.theirSums.set(m.f, m.s); netCheckSum(m.f); }
       break;
-    case 'ping': netSend({ t: 'pong', ts: m.ts }); break;
+    case 'ping': netSendFast({ t: 'pong', ts: m.ts }); break;
     case 'pong': n.rtt = n.rtt ? n.rtt * 0.7 + (performance.now() - m.ts) * 0.3 : performance.now() - m.ts; break;
     case 'bye': netLost('相手が対戦から抜けました。'); break;
   }
 }
 // 相手の入力を受け取る。すでに予測で進めたフレームで予測が外れていたら、巻き戻し地点を記録
+// lastRemote は「そこまで1フレームも欠けずに届いている」最後のフレーム（届く順番は前後することがある）
 function netOnInput(f, b) {
   const n = G.net;
-  if (n.remoteIn.has(f)) return;
+  if (f <= n.lastRemote || n.remoteIn.has(f)) return;   // 受け取り済み（まとめ送りによる重複）
   n.remoteIn.set(f, b);
-  if (f > n.lastRemote) n.lastRemote = f;
+  while (n.remoteIn.has(n.lastRemote + 1)) n.lastRemote++;
   if (f < n.simF && n.used.get(f) !== b && (n.rollFrom < 0 || f < n.rollFrom)) n.rollFrom = f;
+}
+// 自分の入力を送る：相手がまだ受け取りを確認していないフレームをすべてまとめて送る
+// （1回分が欠けても次の送信で補われるので、再送を待って止まることがない）
+function netSendInputs(ahead) {
+  const n = G.net, last = n.simF + NET.INPUT_DELAY - 1;
+  const from = Math.max(n.ackFromRemote + 1, last - NET.SEND_MAX + 1);
+  const b = [];
+  for (let f = from; f <= last; f++) b.push(n.localIn.get(f) || 0);
+  netSendFast({ t: 'i', r: n.round, s: from, b, k: n.lastRemote, a: ahead });
 }
 // 相手の入力の予測：最後に届いた入力の「押しっぱなし」部分を継続（押した瞬間の入力は予測しない）
 function netPredict() {
@@ -1859,7 +1918,7 @@ function netMe() { return netMeLeft() ? G.p : G.c; }
 function netStartRound(r) {
   const n = G.net;
   Object.assign(n, {
-    round: r, inMatch: true, simF: 0, rollFrom: -1, lastRemote: NET.INPUT_DELAY - 1,
+    round: r, inMatch: true, simF: 0, rollFrom: -1, lastRemote: NET.INPUT_DELAY - 1, ackFromRemote: NET.INPUT_DELAY - 1,
     localIn: new Map(), remoteIn: new Map(), used: new Map(), states: new Map(),
     mySums: new Map(), theirSums: new Map(), sentSum: -1, ready: { me: false, them: false },
     pendAtk: false, pendGuard: false, stallT: 0, remoteAhead: 0,
@@ -1916,17 +1975,21 @@ function netTick(any) {
 
   // 3. 相手より先に進みすぎていたら待つ
   const ahead = n.simF - n.lastRemote;
-  if (ahead > NET.MAX_ROLLBACK) { n.stallT++; n.stalls++; return; }
+  if (ahead > NET.MAX_ROLLBACK) {
+    n.stallT++; n.stalls++;
+    if (n.stallT % 3 === 1) netSendInputs(ahead);   // 待っている間も送り続け、相手側の欠けを補う
+    return;
+  }
   n.stallT = 0;
   // 4. 時間合わせ：自分の方が相手より明らかに先行しているときは、ときどき1フレーム休む
-  if (ahead - n.remoteAhead >= 3 && G.time % 2 === 0) return;
+  if (ahead - n.remoteAhead >= 3 && G.time % 2 === 0) { if (G.time % 4 === 0) netSendInputs(ahead); return; }
 
   // 5. 自分の入力を採取して送り、1フレーム進める
   const lf = n.simF + NET.INPUT_DELAY, b = sampleLocal();
   n.localIn.set(lf, b);
-  netSend({ t: 'i', r: n.round, f: lf, b, a: ahead });
   netStep(n.simF);
   n.simF++;
+  netSendInputs(ahead);
 
   // 6. 同期ずれの確認（両者の入力が確定したフレームの状態を比べる）
   const conf = Math.min(n.lastRemote + 1, n.simF - 1);
@@ -1941,7 +2004,9 @@ function netTick(any) {
   }
   // 7. 古い記録を捨てる
   const old = n.simF - 40;
-  for (const mp of [n.states, n.used, n.localIn, n.remoteIn]) for (const k of mp.keys()) if (k < old) mp.delete(k);
+  for (const mp of [n.states, n.used, n.remoteIn]) for (const k of mp.keys()) if (k < old) mp.delete(k);
+  const oldLocal = n.simF - NET.KEEP_FRAMES;
+  for (const k of n.localIn.keys()) if (k < oldLocal) n.localIn.delete(k);
 }
 function netCheckSum(f) {
   const n = G.net, a = n.mySums.get(f), b = n.theirSums.get(f);
