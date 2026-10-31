@@ -2,18 +2,36 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>侍道 ―SAMURAIDO― フレンド対戦</title>
 <!-- フレンド対戦の通信用（ブラウザ同士を直接つなぐ PeerJS） -->
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  body { display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; background: #000; }
+  body { position: fixed; inset: 0; touch-action: none; overscroll-behavior: none;
+         -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: absolute; display: block; image-rendering: pixelated; image-rendering: crisp-edges; background: #000; touch-action: none; }
+  /* スマホ・タブレット用の操作ボタン（右側：移動、左側：攻撃・ガード） */
+  .pad { position: absolute; display: none; touch-action: none; }
+  .pad.show { display: block; }
+  .tb { position: absolute; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        border: 2px solid rgba(243, 210, 122, 0.5); border-radius: 22px; background: rgba(36, 22, 30, 0.6); color: #f3e6c0;
+        font-weight: bold; pointer-events: none; line-height: 1.1; text-shadow: 0 2px 0 #000; }
+  .tb.on { background: rgba(190, 48, 40, 0.75); border-color: #ffe680; color: #fff; transform: scale(0.95); }
+  .tb small { font-size: 0.42em; font-weight: normal; opacity: 0.85; margin-top: 0.3em; }
+  #rotate { position: fixed; inset: 0; display: none; z-index: 10; background: #0b0710; color: #f3e6c0;
+            flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 16px; }
+  #rotate .ico { font-size: 72px; line-height: 1; animation: rot 2.4s ease-in-out infinite; }
+  @keyframes rot { 0%, 30% { transform: rotate(0deg); } 60%, 100% { transform: rotate(90deg); } }
 </style>
 </head>
 <body>
 <canvas id="game" width="960" height="540"></canvas>
+<div id="padL" class="pad"><div id="bAtk" class="tb">攻撃</div><div id="bGrd" class="tb">ガード<small>直前で弾き</small></div></div>
+<div id="padR" class="pad"><div id="bLeft" class="tb">◀</div><div id="bRight" class="tb">▶</div></div>
+<div id="rotate"><div class="ico">📱</div><div style="font-size:22px;font-weight:bold">画面を横向きにしてください</div><div style="font-size:14px;opacity:.75">横向きで遊ぶゲームです</div></div>
 <script>
 'use strict';
 /* =====================================================================
@@ -725,7 +743,7 @@ class AI {
    ===================================================================== */
 const G = {
   mode: 'title', stage: 0, retries: 0, total: null, stageT: 0, endT: 0, frame: 0, time: 0,
-  sel: 0, net: null, lobby: null, typed: [], netMsg: '',
+  sel: 0, net: null, lobby: null, typed: [], netMsg: '', leaveAsk: false,
   hitstop: 0, slow: 0, p: null, c: null, ai: null,
   introT: 0, koT: 0, winner: null, paused: false, pressed: new Set(),
 };
@@ -1264,6 +1282,7 @@ demo.p.facing = 1; demo.c.facing = -1; demo.p.state = 'guard';
 
 function render() {
   const K = SCREEN.SCALE;
+  HOT.list = [];   // タッチ用：この描画で押せるボタンを登録し直す
   // 最終戦（紹介画面・戦闘・エンディング）は日の出の背景
   const menuScene = G.mode === 'title' || G.mode === 'lobby' || G.mode === 'netmsg';
   lc.drawImage(!menuScene && !G.net && G.stage === STAGES.length - 1 ? BG_DAWN : BG, 0, 0);
@@ -1336,14 +1355,29 @@ function render() {
     }
   }
   if (G.net) renderNetStatus();
-  if (G.mode === 'fight') {
+  if (G.mode === 'fight' && !TOUCH.on) {
     txt(G.net ? 'Z:攻撃  X:ガード（直前で弾き）  Esc:退出' : 'Z:攻撃  X:ガード（直前で弾き）  P:一時停止  Esc:タイトル',
       cv.width - 10, cv.height - 12, 13, 'rgba(255,255,255,0.75)', 'right');
-    if (G.paused) {
-      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, cv.width, cv.height);
-      txt('一時停止', cv.width / 2, cv.height / 2 - 20, 54, '#ffffff', 'center', FONT_SERIF);
-      txt('P で再開 / Esc でタイトルへ', cv.width / 2, cv.height / 2 + 40, 20, '#dddddd');
-    }
+  }
+  // タッチ：画面上部中央に「一時停止」（一人用）／「メニュー」（対戦）ボタン
+  if (TOUCH.on && (G.mode === 'fight' || G.mode === 'intro') && !G.paused && !G.leaveAsk) {
+    if (G.net) tbtn('menu', '≡', cv.width / 2, 64, 64, 44, () => { G.leaveAsk = true; }, { size: 28, font: FONT_SANS });
+    else if (G.mode === 'fight') tbtn('pause', 'Ⅱ', cv.width / 2, 64, 64, 44, press('KeyP'), { size: 24, font: FONT_SANS });
+  }
+  if (G.mode === 'fight' && G.paused) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, cv.width, cv.height);
+    txt('一時停止', cv.width / 2, cv.height / 2 - 40, 54, '#ffffff', 'center', FONT_SERIF);
+    if (TOUCH.on) {
+      tbtn('resume', '再開', cv.width / 2 - 140, cv.height / 2 + 50, 240, 70, press('KeyP'), { primary: true });
+      tbtn('quit', 'タイトルへ', cv.width / 2 + 140, cv.height / 2 + 50, 240, 70, press('Escape'));
+    } else txt('P で再開 / Esc でタイトルへ', cv.width / 2, cv.height / 2 + 20, 20, '#dddddd');
+  }
+  // タッチ：対戦から抜けるかの確認（誤って触れても、すぐには抜けない）
+  if (TOUCH.on && G.leaveAsk && G.net) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, cv.width, cv.height);
+    txt('対戦から抜けますか？', cv.width / 2, cv.height / 2 - 50, 40, '#ffffff', 'center', FONT_SERIF);
+    tbtn('stay', '続ける', cv.width / 2 - 140, cv.height / 2 + 40, 240, 70, () => { G.leaveAsk = false; }, { primary: true });
+    tbtn('leave', '抜ける', cv.width / 2 + 140, cv.height / 2 + 40, 240, 70, () => { G.leaveAsk = false; G.pressed.add('Escape'); });
   }
   if (G.mode === 'ko') {
     if (G.koT > 24 && G.koT <= 100) txt('決着', cv.width / 2, cv.height / 2 - 40, 90, '#ffffff', 'center', FONT_SERIF, '#000', 12);
@@ -1356,7 +1390,12 @@ function render() {
       txt(`斬撃 ${st.hits}　弾き ${st.parries}　相子 ${st.clashes}　致命の一撃 ${st.deathblows}`, W / 2, 295, 22, '#ffffff');
       if (n.ready.me) txt(n.ready.them ? '再戦を始めます…' : '相手が再戦を選ぶのを待っています…', W / 2, 360, 22, '#c8b8a0', 'center', FONT_SERIF);
       else if (n.ready.them) txt('相手は再戦を望んでいます', W / 2, 360, 22, '#ffe680', 'center', FONT_SERIF);
-      if (!n.ready.me && (G.time >> 4) % 2 === 0) txt('Z / Enter : 再戦　　Esc : 退出', W / 2, 420, 24, '#f3d27a');
+      if (TOUCH.on) {
+        if (!n.ready.me && !G.leaveAsk) {
+          tbtn('rematch', '再戦', W / 2 - 140, 430, 240, 70, press('KeyZ'), { primary: true });
+          tbtn('exit', '退出', W / 2 + 140, 430, 240, 70, press('Escape'));
+        }
+      } else if (!n.ready.me && (G.time >> 4) % 2 === 0) txt('Z / Enter : 再戦　　Esc : 退出', W / 2, 420, 24, '#f3d27a');
     } else if (G.koT > 100) {
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, cv.width, cv.height);
       const win = G.winner === G.p, last = G.stage === STAGES.length - 1, W = cv.width;
@@ -1366,8 +1405,16 @@ function render() {
       const st = G.p.stats;
       txt(`斬撃 ${st.hits}　弾き ${st.parries}　相子 ${st.clashes}　致命の一撃 ${st.deathblows}`, W / 2, 295, 22, '#ffffff');
       if (win && !last) txt(`次なる相手：第${KANSUJI[G.stage + 1]}戦　${STAGES[G.stage + 1].title}`, W / 2, 345, 20, '#c8b8a0', 'center', FONT_SERIF);
-      const prompt = win ? (last ? 'Z / Enter : 先へ進む' : 'Z / Enter : 次の勝負へ　　Esc : タイトルへ') : 'Z / Enter : 第一戦からやり直す　　Esc : タイトルへ';
-      if ((G.time >> 4) % 2 === 0) txt(prompt, W / 2, 410, 24, '#f3d27a');
+      if (TOUCH.on) {
+        if (win && last) tbtn('next', '先へ進む', W / 2, 425, 300, 70, press('Enter'), { primary: true });
+        else {
+          tbtn('next', win ? '次の勝負へ' : '第一戦から', W / 2 - 150, 425, 260, 70, press('Enter'), { primary: true });
+          tbtn('title', 'タイトルへ', W / 2 + 150, 425, 260, 70, press('Escape'));
+        }
+      } else {
+        const prompt = win ? (last ? 'Z / Enter : 先へ進む' : 'Z / Enter : 次の勝負へ　　Esc : タイトルへ') : 'Z / Enter : 第一戦からやり直す　　Esc : タイトルへ';
+        if ((G.time >> 4) % 2 === 0) txt(prompt, W / 2, 410, 24, '#f3d27a');
+      }
     }
   }
   if (G.mode === 'ending') renderEnding();
@@ -1398,7 +1445,10 @@ function renderStageCard() {
   txt(`― ${st.title} ―`, W / 2, 285, 28, '#ffffff', 'center', FONT_SERIF);
   ctx.globalAlpha = 1;
   drawLadder(385, G.stage);
-  if (G.stageT > 30 && (G.time >> 4) % 2 === 0) txt('Z / Enter で勝負', W / 2, 470, 24, '#f3d27a');
+  if (G.stageT > 30) {
+    if (TOUCH.on) { tapAnywhere('stage', press('Enter')); if ((G.time >> 4) % 2 === 0) txt('画面をタップして勝負', W / 2, 470, 26, '#f3d27a', 'center', FONT_SERIF); }
+    else if ((G.time >> 4) % 2 === 0) txt('Z / Enter で勝負', W / 2, 470, 24, '#f3d27a');
+  }
 }
 
 // 全勝のエンディング
@@ -1413,11 +1463,15 @@ function renderEnding() {
   const sec = Math.round(t.frames / 60);
   txt(`総戦闘時間　${Math.floor(sec / 60)}分${String(sec % 60).padStart(2, '0')}秒`, W / 2, 385, 20, '#c8b8a0');
   ctx.globalAlpha = 1;
-  if (G.endT > 90 && (G.time >> 4) % 2 === 0) txt('Z / Enter : タイトルへ', W / 2, 470, 24, '#f3d27a');
+  if (G.endT > 90) {
+    if (TOUCH.on) tbtn('endtitle', 'タイトルへ', W / 2, 470, 280, 70, press('Enter'), { primary: true });
+    else if ((G.time >> 4) % 2 === 0) txt('Z / Enter : タイトルへ', W / 2, 470, 24, '#f3d27a');
+  }
 }
 
 function renderTitleText() {
   const W = cv.width;
+  if (TOUCH.on) { renderTitleTouch(); return; }
   txt('侍 道', W / 2, 92, 104, '#f3d27a', 'center', FONT_SERIF, '#4a0a0a', 14);
   txt('― SAMURAIDO ―', W / 2, 160, 24, '#ffffff', 'center', FONT_SERIF);
   TITLE_MENU.forEach((m, i) => {
@@ -1431,6 +1485,21 @@ function renderTitleText() {
   txt('← → : 前進・後退　　Z : 攻撃　　X : ガード（攻撃が当たる直前に押すと「弾き（パリィ）」）', W / 2, 434, 18, '#ffffff');
   txt('黄ゲージ＝体力　赤ゲージ＝体幹（0で体幹崩し → 致命の一撃のチャンス）', W / 2, 468, 16, '#e8d8b0');
   if ((G.time >> 5) % 2 === 0) txt('↑↓ で選び、Z / Enter で決定', W / 2, 512, 22, '#f3d27a');
+}
+
+// タッチ用のタイトル画面：遊び方を大きなボタンで選ぶ
+function renderTitleTouch() {
+  const W = cv.width;
+  txt('侍 道', W / 2, 74, 92, '#f3d27a', 'center', FONT_SERIF, '#4a0a0a', 14);
+  txt('― SAMURAIDO ―', W / 2, 136, 22, '#ffffff', 'center', FONT_SERIF);
+  TITLE_MENU.forEach((m, i) => {
+    tbtn('menu' + i, m.label, W / 2, 200 + i * 70, 480, 60, () => { G.sel = i; G.pressed.add('Enter'); }, { size: 25, primary: i === 0 });
+  });
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 404, W, 136);
+  txt('右側の ◀ ▶：前進・後退　　左側の［攻撃］［ガード］：斬る・受ける', W / 2, 432, 19, '#ffffff');
+  txt('ガードは、攻撃が当たる直前に押すと「弾き（パリィ）」になる', W / 2, 466, 17, '#e8d8b0');
+  txt('黄ゲージ＝体力　赤ゲージ＝体幹（0で体幹崩し → 致命の一撃のチャンス）', W / 2, 500, 16, '#c8b8a0');
+  if (canFullscreen()) tbtn('fs', '全画面', W - 80, 36, 130, 46, goFullscreen, { size: 20, font: FONT_SANS });
 }
 
 // フレンド対戦のロビー画面（部屋を作る／入る）
@@ -1449,13 +1518,42 @@ function renderLobby() {
   };
   if (L.phase === 'opening') {
     txt('部屋を準備しています' + dots, W / 2, 250, 26, '#ffffff', 'center', FONT_SERIF);
+    if (TOUCH.on) tbtn('cancel', 'やめる', W / 2, 470, 260, 64, press('Escape'));
   } else if (L.phase === 'host') {
     txt('部屋コード', W / 2, 150, 24, '#e8d8b0', 'center', FONT_SERIF);
     codeBoxes(L.code, 230, false);
     txt('このコードを対戦相手に伝えてください', W / 2, 315, 20, '#ffffff', 'center', FONT_SERIF);
     txt('相手の参加を待っています' + dots, W / 2, 360, 22, '#ffe680', 'center', FONT_SERIF);
     if (L.msg) txt(L.msg, W / 2, 400, 18, '#a0e0a0');
-    txt('C : コードをコピー　　Esc : 部屋を閉じる', W / 2, 480, 20, '#c8b8a0');
+    if (TOUCH.on) {
+      tbtn('copy', 'コードをコピー', W / 2 - 150, 470, 270, 64, () => {
+        if (navigator.clipboard) navigator.clipboard.writeText(L.code).then(() => { if (G.lobby === L) L.msg = 'コードをコピーしました'; }, () => {});
+      }, { primary: true });
+      tbtn('close', '部屋を閉じる', W / 2 + 150, 470, 270, 64, press('Escape'));
+    } else txt('C : コードをコピー　　Esc : 部屋を閉じる', W / 2, 480, 20, '#c8b8a0');
+  } else if (L.phase === 'input' && TOUCH.on) {
+    // タッチ：画面内のキーパッドで部屋コードを入力（端末のキーボードは使わない）
+    txt('部屋コードを入力してください', W / 2, 124, 22, '#e8d8b0', 'center', FONT_SERIF);
+    for (let i = 0; i < NET.CODE_LEN; i++) {
+      const x = W / 2 + (i - (NET.CODE_LEN - 1) / 2) * 66;
+      ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(x - 27, 154, 54, 62);
+      ctx.strokeStyle = i === L.code.length ? '#ffe680' : '#8a7a6a'; ctx.lineWidth = 3; ctx.strokeRect(x - 27, 154, 54, 62);
+      if (L.code[i]) txt(L.code[i], x, 186, 42, '#ffffff', 'center', FONT_SANS, '#000', 5);
+    }
+    const keysList = [...NET.CODE_CHARS, '⌫'], cols = 8, kw = 98, kh = 54, gap = 6;
+    const x0 = (W - (cols * kw + (cols - 1) * gap)) / 2;
+    keysList.forEach((ch, i) => {
+      const cx = x0 + (i % cols) * (kw + gap) + kw / 2, cy = 254 + Math.floor(i / cols) * (kh + gap);
+      tbtn('k' + ch, ch, cx, cy, kw, kh, () => {
+        if (ch === '⌫') L.code = L.code.slice(0, -1); else if (L.code.length < NET.CODE_LEN) L.code += ch;
+      }, { size: 28, font: FONT_SANS });
+    });
+    const full = L.code.length === NET.CODE_LEN;
+    tbtn('paste', '貼り付け', W / 2 - 260, 506, 220, 52, () => {
+      if (navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then(t => { if (G.lobby === L) L.code = cleanCode(t); }, () => {});
+    }, { size: 22 });
+    tbtn('back', '戻る', W / 2, 506, 220, 52, press('Escape'), { size: 22 });
+    tbtn('join', full ? '接続する' : '接続', W / 2 + 260, 506, 220, 52, () => { if (full) G.pressed.add('Enter'); }, { size: 22, primary: full });
   } else if (L.phase === 'input') {
     txt('部屋コードを入力してください', W / 2, 150, 24, '#e8d8b0', 'center', FONT_SERIF);
     codeBoxes(L.code, 240, true);
@@ -1463,11 +1561,13 @@ function renderLobby() {
     txt('英数字キーで入力（貼り付けも可）　Backspace : 1文字消す　　Esc : 戻る', W / 2, 480, 18, '#c8b8a0');
   } else if (L.phase === 'connecting' || L.phase === 'connected') {
     txt(L.phase === 'connected' ? '接続しました。対戦を準備しています' + dots : '部屋「' + L.code + '」に接続しています' + dots, W / 2, 250, 26, '#ffffff', 'center', FONT_SERIF);
-    txt('Esc : やめる', W / 2, 480, 20, '#c8b8a0');
+    if (TOUCH.on) tbtn('cancel', 'やめる', W / 2, 470, 260, 64, press('Escape'));
+    else txt('Esc : やめる', W / 2, 480, 20, '#c8b8a0');
   } else {
     txt('接続できませんでした', W / 2, 200, 32, '#ff8070', 'center', FONT_SERIF);
     txt(L.msg || '', W / 2, 270, 20, '#ffffff');
-    txt('Z / Enter : タイトルへ', W / 2, 480, 22, '#f3d27a');
+    if (TOUCH.on) tbtn('errtitle', 'タイトルへ', W / 2, 470, 280, 64, press('Enter'), { primary: true });
+    else txt('Z / Enter : タイトルへ', W / 2, 480, 22, '#f3d27a');
   }
 }
 // 切断などのお知らせ画面
@@ -1476,7 +1576,8 @@ function renderNetMsg() {
   ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, cv.height);
   txt('対戦終了', W / 2, 200, 40, '#f3d27a', 'center', FONT_SERIF, '#2a0a0a', 10);
   txt(G.netMsg || '', W / 2, 280, 22, '#ffffff', 'center', FONT_SERIF);
-  txt('Z / Enter : タイトルへ', W / 2, 460, 22, '#f3d27a');
+  if (TOUCH.on) tbtn('msgtitle', 'タイトルへ', W / 2, 460, 280, 64, press('Enter'), { primary: true });
+  else txt('Z / Enter : タイトルへ', W / 2, 460, 22, '#f3d27a');
 }
 // 対戦中の通信状態（左下）
 function renderNetStatus() {
@@ -1514,7 +1615,7 @@ function addTotals() {
   for (const k of ['hits', 'parries', 'clashes', 'deathblows']) G.total[k] += G.p.stats[k];
   G.total.frames += G.frame;
 }
-function toTitle() { G.mode = 'title'; G.paused = false; clearFX(); }
+function toTitle() { G.mode = 'title'; G.paused = false; G.leaveAsk = false; clearFX(); }
 
 // CPU戦の入力：キーボード＋CPUのAI
 function cpuFeed() {
@@ -1836,7 +1937,7 @@ function netClose() {
 }
 function netLeave() { netSend({ t: 'bye' }); netClose(); toTitle(); }   // 自分から抜ける
 function netLost(msg) {                                                  // 相手側の都合で切れた
-  netClose(); clearFX();
+  netClose(); clearFX(); G.leaveAsk = false;
   G.mode = 'netmsg'; G.netMsg = msg;
 }
 // 定期処理：往復時間の測定と無応答の検出
@@ -2056,20 +2157,26 @@ function lobbyTick(any) {
 
 /* ---- 入力 ---- */
 const keys = {};
+// キーを押した／離した。キーボードとタッチ操作の両方からここを通るので、ゲーム側の処理は共通
+function keyDown(code, key = '', repeat = false) {
+  Snd.init();
+  keys[code] = true;
+  if (repeat) return;
+  G.pressed.add(code);
+  if (G.net && G.net.inMatch) {                       // オンライン：押した瞬間を次の送信入力に載せる
+    if (code === 'KeyZ') G.net.pendAtk = true;
+    if (code === 'KeyX') G.net.pendGuard = true;
+  } else if (G.mode === 'fight' && !G.paused && G.p) { // CPU戦
+    if (code === 'KeyZ') G.p.tapAtk = true;
+    if (code === 'KeyX') G.p.tapGuard = true;
+  }
+  if (G.mode === 'lobby' && G.lobby && G.lobby.phase === 'input' && key.length === 1) G.typed.push(key.toUpperCase());
+}
+function keyUp(code) { keys[code] = false; }
+function setKey(code, on) { if (on && !keys[code]) keyDown(code); else if (!on && keys[code]) keyUp(code); }
 window.addEventListener('keydown', e => {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'KeyZ', 'KeyX'].includes(e.code)) e.preventDefault();
-  Snd.init();
-  keys[e.code] = true;
-  if (e.repeat) return;
-  G.pressed.add(e.code);
-  if (G.net && G.net.inMatch) {                       // オンライン：押した瞬間を次の送信入力に載せる
-    if (e.code === 'KeyZ') G.net.pendAtk = true;
-    if (e.code === 'KeyX') G.net.pendGuard = true;
-  } else if (G.mode === 'fight' && !G.paused && G.p) { // CPU戦
-    if (e.code === 'KeyZ') G.p.tapAtk = true;
-    if (e.code === 'KeyX') G.p.tapGuard = true;
-  }
-  if (G.mode === 'lobby' && G.lobby && G.lobby.phase === 'input' && e.key.length === 1) G.typed.push(e.key.toUpperCase());
+  keyDown(e.code, e.key, e.repeat);
 });
 // 部屋コードの貼り付け
 window.addEventListener('paste', e => {
@@ -2077,17 +2184,184 @@ window.addEventListener('paste', e => {
   const t = (e.clipboardData && e.clipboardData.getData('text')) || '';
   G.lobby.code = cleanCode(t);
 });
-window.addEventListener('keyup', e => { keys[e.code] = false; });
+window.addEventListener('keyup', e => keyUp(e.code));
 window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 window.addEventListener('mousedown', () => Snd.init());
 
-/* ---- 画面サイズ合わせ ---- */
-function fit() {
-  const s = Math.min(window.innerWidth / cv.width, window.innerHeight / cv.height);
-  cv.style.width = Math.floor(cv.width * s) + 'px';
-  cv.style.height = Math.floor(cv.height * s) + 'px';
+/* =====================================================================
+   スマホ・タブレット（タッチ操作）
+   ・右手（画面右側）：◀ ▶ で前進・後退。指を置いたまま左右に滑らせれば、離さずに向きを切り替えられる
+   ・左手（画面左側）：［攻撃］［ガード］。ガードは押している間ずっと構え、攻撃が当たる直前に押せば弾き。
+     指を滑らせてボタンを移ると、移った先のボタンを押したことになる（親指を転がして素早く切り替えられる）
+   ・スマホは横向きで、操作ボタンを画面の左右の帯に置き、ゲーム画面にかぶらないようにする
+   ・タブレットは縦横どちらでも、操作ボタンを画面下のパネルに置く
+   ・メニューや勝敗画面はタップで操作し、Z / X / Enter などのキー表示は一切出さない
+   ===================================================================== */
+const TOUCH = {
+  on: false,          // タッチ用の画面にしているか
+  kind: 'pc',         // 'phone' | 'tablet' | 'pc'
+  rotate: false,      // スマホ縦向きで「横向きに」の案内を出しているか
+  pads: false,        // 操作ボタンを表示中か（スマホはこの間だけ画面の左右を空ける）
+};
+const $id = id => document.getElementById(id);
+const padL = $id('padL'), padR = $id('padR'), bAtk = $id('bAtk'), bGrd = $id('bGrd'), bLeft = $id('bLeft'), bRight = $id('bRight');
+const rotateEl = $id('rotate');
+for (const el of [padL, padR, rotateEl]) el.style.fontFamily = FONT_SERIF;
+function touchDevice() {
+  const mq = q => window.matchMedia && window.matchMedia(q).matches;
+  return mq('(pointer: coarse)') || (navigator.maxTouchPoints > 0 && !mq('(pointer: fine)'));
 }
-window.addEventListener('resize', fit); fit();
+function deviceKind() {
+  const s = Math.min(screen.width || window.innerWidth, screen.height || window.innerHeight);
+  return s < 600 ? 'phone' : 'tablet';
+}
+function enableTouch() { if (TOUCH.on) return; TOUCH.on = true; TOUCH.kind = deviceKind(); fit(); }
+if (touchDevice()) { TOUCH.on = true; TOUCH.kind = deviceKind(); }
+window.addEventListener('touchstart', () => { Snd.init(); enableTouch(); }, { passive: true });
+window.addEventListener('touchend', () => Snd.init(), { passive: true });   // iPhoneは指を離した時でないと音が鳴らせない
+for (const ev of ['gesturestart', 'dblclick', 'contextmenu']) document.addEventListener(ev, e => e.preventDefault());
+
+const vibrate = ms => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* 非対応 */ } };
+const rectOf = el => el.getBoundingClientRect();
+const centerDist = (el, x, y) => { const r = rectOf(el); return Math.hypot(x - (r.left + r.right) / 2, y - (r.top + r.bottom) / 2); };
+
+// ---- 右手：移動（指が◀側にあるか▶側にあるかで向きが決まる。最後に触れた指を優先） ----
+const moveFingers = new Map();
+function updateMove() {
+  let dir = 0;
+  const f = [...moveFingers.values()].pop();
+  if (f) { const a = rectOf(bLeft), b = rectOf(bRight); dir = f.x < (a.right + b.left) / 2 ? -1 : 1; }
+  setKey('ArrowLeft', dir < 0); setKey('ArrowRight', dir > 0);
+  bLeft.classList.toggle('on', dir < 0); bRight.classList.toggle('on', dir > 0);
+}
+padR.addEventListener('pointerdown', e => {
+  e.preventDefault(); Snd.init();
+  try { padR.setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
+  moveFingers.set(e.pointerId, { x: e.clientX }); updateMove();
+});
+padR.addEventListener('pointermove', e => { const f = moveFingers.get(e.pointerId); if (f) { f.x = e.clientX; updateMove(); } });
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) padR.addEventListener(ev, e => { if (moveFingers.delete(e.pointerId)) updateMove(); });
+
+// ---- 左手：攻撃・ガード（左側の帯／パネル全体が反応範囲。指に一番近いボタンを押したことになる） ----
+const actFingers = new Map();   // 指 → 'atk' | 'grd'
+const actAt = (x, y) => centerDist(bAtk, x, y) <= centerDist(bGrd, x, y) ? 'atk' : 'grd';
+const fingersOn = b => [...actFingers.values()].filter(v => v === b).length;
+function actPress(b) {
+  vibrate(8);
+  if (b === 'atk') keyDown('KeyZ');
+  else keyDown('KeyX');          // 押した瞬間＝弾きの判定、押している間＝ガード
+}
+function actRelease(b) {
+  if (b === 'atk') { if (!fingersOn('atk')) keyUp('KeyZ'); }
+  else if (!fingersOn('grd')) keyUp('KeyX');
+}
+function updateActView() { bAtk.classList.toggle('on', fingersOn('atk') > 0); bGrd.classList.toggle('on', fingersOn('grd') > 0); }
+padL.addEventListener('pointerdown', e => {
+  e.preventDefault(); Snd.init();
+  try { padL.setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
+  const b = actAt(e.clientX, e.clientY);
+  actFingers.set(e.pointerId, b); actPress(b); updateActView();
+});
+padL.addEventListener('pointermove', e => {
+  const cur = actFingers.get(e.pointerId); if (!cur) return;
+  const b = actAt(e.clientX, e.clientY);
+  if (b !== cur) { actFingers.set(e.pointerId, b); actRelease(cur); actPress(b); updateActView(); }
+});
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) padL.addEventListener(ev, e => {
+  const cur = actFingers.get(e.pointerId); if (!cur) return;
+  actFingers.delete(e.pointerId); actRelease(cur); updateActView();
+});
+function releaseAllTouch() {
+  moveFingers.clear(); actFingers.clear(); updateMove();
+  setKey('KeyZ', false); setKey('KeyX', false); updateActView();
+}
+
+// ---- 画面内のボタン（メニュー・勝敗画面など）：描画のたびに押せる範囲を登録し、タップで実行 ----
+const HOT = { list: [], downId: null };
+function hot(id, x, y, w, h, fn) { HOT.list.push({ id, x, y, w, h, fn }); }
+function hitHot(e) {
+  const r = rectOf(cv), x = (e.clientX - r.left) * cv.width / r.width, y = (e.clientY - r.top) * cv.height / r.height;
+  for (let i = HOT.list.length - 1; i >= 0; i--) { const h = HOT.list[i]; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return h; }
+  return null;
+}
+cv.addEventListener('pointerdown', e => { Snd.init(); const h = hitHot(e); HOT.downId = h ? h.id : null; });
+cv.addEventListener('pointerup', e => {
+  const h = hitHot(e), id = HOT.downId; HOT.downId = null;
+  if (h && h.id === id) { vibrate(6); h.fn(); }
+});
+cv.addEventListener('pointercancel', () => { HOT.downId = null; });
+const press = code => () => G.pressed.add(code);   // 画面内ボタン → キーを押したのと同じ扱い
+// 角丸のボタンを描いて、押せる範囲に登録する
+function tbtn(id, label, cx, cy, w, h, fn, o = {}) {
+  const x = cx - w / 2, y = cy - h / 2, down = HOT.downId === id;
+  ctx.fillStyle = down ? 'rgba(200,60,50,0.9)' : o.primary ? 'rgba(140,22,22,0.85)' : 'rgba(28,18,26,0.82)';
+  ctx.strokeStyle = o.primary ? '#ffe680' : 'rgba(243,210,122,0.6)'; ctx.lineWidth = 3;
+  ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, 16); else ctx.rect(x, y, w, h); ctx.fill(); ctx.stroke();
+  txt(label, cx, cy + 1, o.size || Math.min(30, Math.round(h * 0.46)), o.primary ? '#ffe680' : '#f3e6c0', 'center', o.font || FONT_SERIF);
+  hot(id, x, y, w, h, fn);
+}
+function tapAnywhere(id, fn) { hot(id, 0, 0, cv.width, cv.height, fn); }
+// 全画面（対応している端末のみ。スマホは横向きに固定する）
+const canFullscreen = () => !!(document.fullscreenEnabled && document.documentElement.requestFullscreen) && !document.fullscreenElement;
+function goFullscreen() {
+  document.documentElement.requestFullscreen().then(() => {
+    if (TOUCH.kind === 'phone' && screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+  }).catch(() => {});
+}
+
+/* ---- 画面サイズ合わせ（PC：中央に表示／スマホ：左右に操作の帯／タブレット：下に操作パネル） ---- */
+const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
+function place(el, x, y, w, h) { Object.assign(el.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }); }
+function fit() {
+  const W = window.innerWidth, H = window.innerHeight;
+  let cw, chh, cx, cy;
+  TOUCH.rotate = TOUCH.on && TOUCH.kind === 'phone' && H > W;
+  rotateEl.style.display = TOUCH.rotate ? 'flex' : 'none';
+  if (!TOUCH.on) {
+    const s = Math.min(W / cv.width, H / cv.height);
+    cw = Math.floor(cv.width * s); chh = Math.floor(cv.height * s); cx = (W - cw) / 2; cy = (H - chh) / 2;
+  } else if (TOUCH.kind === 'phone' && !TOUCH.pads) {
+    // スマホのメニュー画面：操作ボタンが要らないので、ゲーム画面をできるだけ大きく表示
+    const s = Math.min(W / cv.width, H / cv.height);
+    cw = cv.width * s; chh = cv.height * s; cx = (W - cw) / 2; cy = (H - chh) / 2;
+  } else if (TOUCH.kind === 'phone') {
+    // スマホ横向きの対戦中：左右の帯に操作ボタン、真ん中にゲーム画面
+    const col = Math.round(clampN(W * 0.19, 118, 200));
+    cw = Math.min(W - col * 2, H * 16 / 9); chh = cw * 9 / 16; cx = (W - cw) / 2; cy = (H - chh) / 2;
+    place(padL, 0, 0, col, H); place(padR, W - col, 0, col, H);
+    const g = 8, bw = col - g * 2, bh = Math.min((H - g * 3) / 2, bw * 1.15);
+    place(bAtk, g, H - bh * 2 - g * 2, bw, bh); place(bGrd, g, H - bh - g, bw, bh);   // 左：上に攻撃、下にガード
+    const mw = (col - g * 3) / 2, mh = Math.min(H * 0.62, 240);
+    place(bLeft, g, H - mh - g, mw, mh); place(bRight, g * 2 + mw, H - mh - g, mw, mh);   // 右：◀ ▶
+    for (const el of [bAtk, bGrd]) el.style.fontSize = Math.round(clampN(bw * 0.24, 20, 34)) + 'px';
+    for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(mw * 0.5, 24, 44)) + 'px';
+  } else {
+    // タブレット：上にゲーム画面、下に操作パネル（縦向きは大きめ）
+    const portrait = H > W, panel = Math.round(clampN(H * (portrait ? 0.3 : 0.24), 160, 330));
+    cw = Math.min(W, (H - panel) * 16 / 9); chh = cw * 9 / 16; cx = (W - cw) / 2; cy = Math.max(0, (H - panel - chh) / 2);
+    const top = cy + chh, ph = H - top;
+    place(padL, 0, top, W / 2, ph); place(padR, W / 2, top, W / 2, ph);
+    const g = 18, b = Math.min(ph - g * 2, (W / 2 - g * 3) / 2, 210), by = (ph - b) / 2;
+    place(bAtk, g, by, b, b); place(bGrd, g * 2 + b, by, b, b);                   // 左：攻撃・ガード
+    place(bLeft, W / 2 - g * 2 - b * 2, by, b, b); place(bRight, W / 2 - g - b, by, b, b);   // 右：◀ ▶（画面の右端寄り）
+    for (const el of [bAtk, bGrd]) el.style.fontSize = Math.round(clampN(b * 0.2, 22, 40)) + 'px';
+    for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(b * 0.34, 28, 60)) + 'px';
+  }
+  Object.assign(cv.style, { left: cx + 'px', top: cy + 'px', width: cw + 'px', height: chh + 'px' });
+}
+window.addEventListener('resize', fit);
+window.addEventListener('orientationchange', () => setTimeout(fit, 200));
+fit();
+// 操作ボタンは対戦中（開始演出・戦闘・決着）だけ表示。スマホ縦向きで案内中のCPU戦は一時停止
+function touchFrame() {
+  const show = TOUCH.on && !TOUCH.rotate && (G.mode === 'intro' || G.mode === 'fight' || G.mode === 'ko');
+  if (padL.classList.contains('show') !== show) {
+    padL.classList.toggle('show', show); padR.classList.toggle('show', show);
+    if (!show) releaseAllTouch();
+    if (TOUCH.kind === 'phone') { TOUCH.pads = show; fit(); }   // スマホは対戦中だけ左右に操作の帯を空ける
+  }
+  if (TOUCH.rotate && G.mode === 'fight' && !G.net && !G.paused) G.paused = true;
+}
 
 /* ---- メインループ（requestAnimationFrame + 固定60fps更新） ---- */
 const STEP = 1000 / 60;
@@ -2096,6 +2370,7 @@ function loop(now) {
   // 対戦中は、PCが一瞬固まっても失った時間を切り捨てずに取り戻す（切り捨てると自分の時計が遅れたままになる）
   acc += Math.min(G.net && G.net.inMatch ? NET.CATCHUP_MAX_MS : 100, now - last); last = now;
   while (acc >= STEP) { acc -= STEP; tick(); }
+  touchFrame();
   render();
   requestAnimationFrame(loop);
 }
