@@ -1637,11 +1637,16 @@ function tick() {
      実際の入力が届いて予測が外れていたら、そのフレームまで巻き戻して計算し直す
    ===================================================================== */
 const NET = {
-  VERSION: 4,               // 通信の取り決めの版（違う版同士はつながない）
+  VERSION: 5,               // 通信の取り決めの版（違う版同士はつながない）
   INPUT_DELAY: 0,           // 入力遅延（フレーム）：0＝自分の入力はオフラインと同じく即座に反映。
                             //   相手の入力の遅れはすべて予測と巻き戻しで吸収する（1〜2フレームの巻き戻しが増えるが目には見えにくい）。
                             //   相手のワープが気になる場合は 1〜2 にすると、操作が少し遅れる代わりに巻き戻しが減る
-  MAX_ROLLBACK: 17,         // 予測で先行できる最大フレーム数（超えたら相手を待つ）。Wi-Fiの一瞬の遅れを止まらずに吸収する
+  MAX_ROLLBACK: 30,         // 予測で先行できる最大フレーム数（約0.5秒。超えたら相手を待つ）。Wi-Fiや相手のPCの一瞬の固まりでも、自分は止まらずに動き続ける（相手は補正でワープして見える）
+  // 時間合わせ：自分の時計が相手より遅れているときだけ、1フレーム余分に進めて追いつく（減速は一切しない）
+  SYNC_WINDOW: 60,          // 時計の差を判断する平均の長さ（フレーム）
+  SYNC_BEHIND: 2,           // 平均がこの値（≒1フレーム分の遅れ）以上マイナスなら追いつく
+  SYNC_COOLDOWN: 30,        // 追いついた後、次に判断するまでの間隔（フレーム）
+  CATCHUP_MAX_MS: 1000,     // 対戦中、PCが一瞬固まったときに取り戻す時間の上限（ミリ秒）
   SEND_MAX: 60,             // 1回の送信に含める入力の最大フレーム数（相手が受け取りを確認していない分をまとめて送る）
   KEEP_FRAMES: 90,          // 自分の入力の記録を残すフレーム数
   SUM_INTERVAL: 60,         // 同期ずれの確認間隔（フレーム）
@@ -1730,7 +1735,7 @@ function peerOptions() {
 }
 function newNet(isHost) {
   return { isHost, peer: null, conn: null, connected: false, inMatch: false, round: 0, shown: new Set(),
-    rtt: 0, lastMsg: performance.now(), pingT: 0, desync: false, rollbacks: 0, stalls: 0, remoteAhead: 0, route: '',
+    rtt: 0, lastMsg: performance.now(), pingT: 0, desync: false, rollbacks: 0, stalls: 0, remoteAhead: 0, route: '', catchups: 0,
     fast: null, fastRecv: 0 };
 }
 function peerErrMsg(err) {
@@ -1923,7 +1928,7 @@ function netStartRound(r) {
     round: r, inMatch: true, simF: 0, rollFrom: -1, lastRemote: NET.INPUT_DELAY - 1, ackFromRemote: NET.INPUT_DELAY - 1,
     localIn: new Map(), remoteIn: new Map(), used: new Map(), states: new Map(),
     mySums: new Map(), theirSums: new Map(), sentSum: -1, ready: { me: false, them: false },
-    pendAtk: false, pendGuard: false, stallT: 0, remoteAhead: 0,
+    pendAtk: false, pendGuard: false, stallT: 0, remoteAhead: 0, advHist: [], syncCool: 0,
   });
   for (let f = 0; f < NET.INPUT_DELAY; f++) { n.localIn.set(f, 0); n.remoteIn.set(f, 0); } // 最初の数フレームは無入力で確定
   G.stage = 0; G.ai = null; G.lobby = null;
@@ -1956,6 +1961,13 @@ function sampleLocal() {
   return b;
 }
 
+function netAdvance(b) {                                     // 自分の入力を記録して1フレーム進める
+  const n = G.net;
+  n.localIn.set(n.simF + NET.INPUT_DELAY, b);
+  netStep(n.simF);
+  n.simF++;
+}
+
 // ---- 毎フレームの同期処理 ----
 function netTick(any) {
   const n = G.net;
@@ -1983,14 +1995,22 @@ function netTick(any) {
     return;
   }
   n.stallT = 0;
-  // 4. 時間合わせ：自分の方が相手より明らかに先行しているときは、ときどき1フレーム休む
-  if (ahead - n.remoteAhead >= 3 && G.time % 2 === 0) { if (G.time % 4 === 0) netSendInputs(ahead); return; }
+  // 4. 時間合わせ：自分の時計が相手より遅れているときだけ、ときどき1フレーム余分に進めて追いつく。
+  //    自分が先行していても減速はしない（自分の侍は常に通常の速さで動く。相手側が追いついてくる）。
+  //    データの届き方の揺れに反応しないよう、約1秒分の平均で判断する
+  n.advHist.push(ahead - n.remoteAhead);                    // ≒ 両者の時計の差 ×2（マイナスなら自分が遅れている）
+  if (n.advHist.length > NET.SYNC_WINDOW) n.advHist.shift();
+  if (n.syncCool > 0) n.syncCool--;
+  let extra = false;
+  if (n.syncCool === 0 && n.advHist.length >= NET.SYNC_WINDOW && ahead + 1 <= NET.MAX_ROLLBACK) {
+    const avg = n.advHist.reduce((s, v) => s + v, 0) / n.advHist.length;
+    if (avg <= -NET.SYNC_BEHIND) { extra = true; n.advHist.length = 0; n.syncCool = NET.SYNC_COOLDOWN; n.catchups++; }
+  }
 
-  // 5. 自分の入力を採取して送り、1フレーム進める
-  const lf = n.simF + NET.INPUT_DELAY, b = sampleLocal();
-  n.localIn.set(lf, b);
-  netStep(n.simF);
-  n.simF++;
+  // 5. 自分の入力を採取して送り、1フレーム進める（追いつく場合はもう1フレーム）
+  const b = sampleLocal();
+  netAdvance(b);
+  if (extra) netAdvance(b & (IN_L | IN_R | IN_G));            // 余分のフレームでは押しっぱなしの入力だけを続ける
   netSendInputs(ahead);
 
   // 6. 同期ずれの確認（両者の入力が確定したフレームの状態を比べる）
@@ -2005,7 +2025,7 @@ function netTick(any) {
     netCheckSum(f);
   }
   // 7. 古い記録を捨てる
-  const old = n.simF - 40;
+  const old = n.simF - (NET.MAX_ROLLBACK + 20);   // 巻き戻しに必要な分より少し多めに残す
   for (const mp of [n.states, n.used, n.remoteIn]) for (const k of mp.keys()) if (k < old) mp.delete(k);
   const oldLocal = n.simF - NET.KEEP_FRAMES;
   for (const k of n.localIn.keys()) if (k < oldLocal) n.localIn.delete(k);
@@ -2073,7 +2093,8 @@ window.addEventListener('resize', fit); fit();
 const STEP = 1000 / 60;
 let acc = 0, last = performance.now();
 function loop(now) {
-  acc += Math.min(100, now - last); last = now;
+  // 対戦中は、PCが一瞬固まっても失った時間を切り捨てずに取り戻す（切り捨てると自分の時計が遅れたままになる）
+  acc += Math.min(G.net && G.net.inMatch ? NET.CATCHUP_MAX_MS : 100, now - last); last = now;
   while (acc >= STEP) { acc -= STEP; tick(); }
   render();
   requestAnimationFrame(loop);
