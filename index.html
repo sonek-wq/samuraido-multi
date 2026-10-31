@@ -21,18 +21,18 @@
         font-weight: bold; pointer-events: none; line-height: 1.1; text-shadow: 0 2px 0 #000; }
   .tb.on { background: rgba(190, 48, 40, 0.75); border-color: #ffe680; color: #fff; transform: scale(0.95); }
   .tb small { font-size: 0.42em; font-weight: normal; opacity: 0.85; margin-top: 0.3em; }
-  #rotate { position: fixed; inset: 0; display: none; z-index: 10; background: #0b0710; color: #f3e6c0;
-            flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 16px; }
-  #rotate .ico { font-size: 72px; line-height: 1; animation: rot 2.4s ease-in-out infinite; }
-  @keyframes rot { 0%, 30% { transform: rotate(0deg); } 60%, 100% { transform: rotate(90deg); } }
+  /* スマホ縦向きのメニュー中に、空いている下側へ出す「横向きのすすめ」（操作の邪魔はしない） */
+  #hint { position: absolute; display: none; box-sizing: border-box; padding: 16px 24px; flex-direction: column; gap: 10px;
+          align-items: center; justify-content: center; text-align: center; color: #f3e6c0; pointer-events: none; }
+  #hint b { font-size: 18px; color: #ffe680; }
+  #hint span { font-size: 13px; opacity: 0.75; line-height: 1.6; }
 </style>
 </head>
 <body>
 <canvas id="game" width="960" height="540"></canvas>
 <div id="padL" class="pad"><div id="bAtk" class="tb">攻撃</div><div id="bGrd" class="tb">ガード<small>直前で弾き</small></div></div>
 <div id="padR" class="pad"><div id="bLeft" class="tb">◀</div><div id="bRight" class="tb">▶</div></div>
-<div id="rotate"><div class="ico">📱</div><div style="font-size:22px;font-weight:bold">画面を横向きにしてください</div><div style="font-size:14px;opacity:.75">横向きで遊ぶゲームです</div></div>
-<script>
+<div id="hint"><b>横向きにすると、大きな画面で遊べます</b><span>このまま縦向きでも遊べます。<br>横にしても画面が回らないときは、<br>端末の「画面の向きのロック」を解除してください。</span></div><script>
 'use strict';
 /* =====================================================================
    侍道 ―SAMURAIDO―
@@ -2193,20 +2193,22 @@ window.addEventListener('mousedown', () => Snd.init());
    ・右手（画面右側）：◀ ▶ で前進・後退。指を置いたまま左右に滑らせれば、離さずに向きを切り替えられる
    ・左手（画面左側）：［攻撃］［ガード］。ガードは押している間ずっと構え、攻撃が当たる直前に押せば弾き。
      指を滑らせてボタンを移ると、移った先のボタンを押したことになる（親指を転がして素早く切り替えられる）
-   ・スマホは横向きで、操作ボタンを画面の左右の帯に置き、ゲーム画面にかぶらないようにする
-   ・タブレットは縦横どちらでも、操作ボタンを画面下のパネルに置く
+   ・横向き（スマホ）：操作ボタンを画面の左右の帯に置き、ゲーム画面にかぶらないようにする
+   ・縦向き（スマホ・タブレット）、横向き（タブレット）：上にゲーム画面、下に操作ボタンのパネル
+     （回転ロック中でも遊べるよう、縦向きでも止めずにそのまま遊べる。横向きはタイトルで勧めるだけ）
    ・メニューや勝敗画面はタップで操作し、Z / X / Enter などのキー表示は一切出さない
    ===================================================================== */
 const TOUCH = {
   on: false,          // タッチ用の画面にしているか
   kind: 'pc',         // 'phone' | 'tablet' | 'pc'
-  rotate: false,      // スマホ縦向きで「横向きに」の案内を出しているか
-  pads: false,        // 操作ボタンを表示中か（スマホはこの間だけ画面の左右を空ける）
+  portrait: false,    // 縦向きか
+  pads: false,        // 操作ボタンを表示中か（スマホ横向きはこの間だけ画面の左右を空ける）
+  w: 0, h: 0,         // 最後に配置したときの画面の大きさ（向きの変化を確実に拾うため毎フレーム比べる）
 };
 const $id = id => document.getElementById(id);
 const padL = $id('padL'), padR = $id('padR'), bAtk = $id('bAtk'), bGrd = $id('bGrd'), bLeft = $id('bLeft'), bRight = $id('bRight');
-const rotateEl = $id('rotate');
-for (const el of [padL, padR, rotateEl]) el.style.fontFamily = FONT_SERIF;
+const hintEl = $id('hint');
+for (const el of [padL, padR, hintEl]) el.style.fontFamily = FONT_SERIF;
 function touchDevice() {
   const mq = q => window.matchMedia && window.matchMedia(q).matches;
   return mq('(pointer: coarse)') || (navigator.maxTouchPoints > 0 && !mq('(pointer: fine)'));
@@ -2314,12 +2316,17 @@ const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
 function place(el, x, y, w, h) { Object.assign(el.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }); }
 function fit() {
   const W = window.innerWidth, H = window.innerHeight;
-  let cw, chh, cx, cy;
-  TOUCH.rotate = TOUCH.on && TOUCH.kind === 'phone' && H > W;
-  rotateEl.style.display = TOUCH.rotate ? 'flex' : 'none';
+  TOUCH.w = W; TOUCH.h = H; TOUCH.portrait = H > W;
+  let cw, chh, cx, cy, hintTop = -1;
   if (!TOUCH.on) {
     const s = Math.min(W / cv.width, H / cv.height);
     cw = Math.floor(cv.width * s); chh = Math.floor(cv.height * s); cx = (W - cw) / 2; cy = (H - chh) / 2;
+  } else if (TOUCH.kind === 'phone' && TOUCH.portrait) {
+    // スマホ縦向き（回転ロック中など）：上にゲーム画面、下に操作パネル
+    const panel = Math.round(clampN(H * 0.42, 200, 420));
+    cw = Math.min(W, (H - panel) * 16 / 9); chh = cw * 9 / 16; cx = (W - cw) / 2; cy = Math.max(0, (H - panel - chh) / 2);
+    placeBottomPanel(W, H, cy + chh, 12);
+    if (!TOUCH.pads) hintTop = cy + chh;   // メニュー中は空いている下側に、横向きのすすめを表示
   } else if (TOUCH.kind === 'phone' && !TOUCH.pads) {
     // スマホのメニュー画面：操作ボタンが要らないので、ゲーム画面をできるだけ大きく表示
     const s = Math.min(W / cv.width, H / cv.height);
@@ -2337,30 +2344,41 @@ function fit() {
     for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(mw * 0.5, 24, 44)) + 'px';
   } else {
     // タブレット：上にゲーム画面、下に操作パネル（縦向きは大きめ）
-    const portrait = H > W, panel = Math.round(clampN(H * (portrait ? 0.3 : 0.24), 160, 330));
+    const panel = Math.round(clampN(H * (TOUCH.portrait ? 0.3 : 0.24), 160, 330));
     cw = Math.min(W, (H - panel) * 16 / 9); chh = cw * 9 / 16; cx = (W - cw) / 2; cy = Math.max(0, (H - panel - chh) / 2);
-    const top = cy + chh, ph = H - top;
-    place(padL, 0, top, W / 2, ph); place(padR, W / 2, top, W / 2, ph);
-    const g = 18, b = Math.min(ph - g * 2, (W / 2 - g * 3) / 2, 210), by = (ph - b) / 2;
-    place(bAtk, g, by, b, b); place(bGrd, g * 2 + b, by, b, b);                   // 左：攻撃・ガード
-    place(bLeft, W / 2 - g * 2 - b * 2, by, b, b); place(bRight, W / 2 - g - b, by, b, b);   // 右：◀ ▶（画面の右端寄り）
-    for (const el of [bAtk, bGrd]) el.style.fontSize = Math.round(clampN(b * 0.2, 22, 40)) + 'px';
-    for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(b * 0.34, 28, 60)) + 'px';
+    placeBottomPanel(W, H, cy + chh, 18);
   }
   Object.assign(cv.style, { left: cx + 'px', top: cy + 'px', width: cw + 'px', height: chh + 'px' });
+  hintEl.style.display = hintTop >= 0 ? 'flex' : 'none';
+  if (hintTop >= 0) place(hintEl, 0, hintTop, W, H - hintTop);
+}
+// 画面下の操作パネル：左半分に［攻撃］［ガード］、右半分の右端寄りに ◀ ▶。親指が届きやすいよう下寄りに置く
+function placeBottomPanel(W, H, top, g) {
+  const ph = H - top;
+  place(padL, 0, top, W / 2, ph); place(padR, W / 2, top, W / 2, ph);
+  const bw = Math.min((W / 2 - g * 3) / 2, 210);
+  const bh = Math.min(ph - g * 2, Math.max(bw, Math.min(bw * 1.8, 260)));
+  const by = Math.max(g, ph - bh - Math.max(g * 2, ph * 0.12));
+  place(bAtk, g, by, bw, bh); place(bGrd, g * 2 + bw, by, bw, bh);
+  place(bLeft, W / 2 - g * 2 - bw * 2, by, bw, bh); place(bRight, W / 2 - g - bw, by, bw, bh);
+  for (const el of [bAtk, bGrd]) el.style.fontSize = Math.round(clampN(bw * 0.24, 20, 40)) + 'px';
+  for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(bw * 0.4, 26, 60)) + 'px';
 }
 window.addEventListener('resize', fit);
-window.addEventListener('orientationchange', () => setTimeout(fit, 200));
+window.addEventListener('orientationchange', () => { fit(); setTimeout(fit, 250); setTimeout(fit, 800); });
+if (window.visualViewport) window.visualViewport.addEventListener('resize', fit);
+if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', () => setTimeout(fit, 100));
 fit();
-// 操作ボタンは対戦中（開始演出・戦闘・決着）だけ表示。スマホ縦向きで案内中のCPU戦は一時停止
+// 毎フレーム：画面の大きさが変わっていたら配置し直す（向きを変えたときの通知が遅れる端末への備え）。
+// 操作ボタンは対戦中（開始演出・戦闘・決着）だけ表示
 function touchFrame() {
-  const show = TOUCH.on && !TOUCH.rotate && (G.mode === 'intro' || G.mode === 'fight' || G.mode === 'ko');
+  if (TOUCH.on && (window.innerWidth !== TOUCH.w || window.innerHeight !== TOUCH.h)) fit();
+  const show = TOUCH.on && (G.mode === 'intro' || G.mode === 'fight' || G.mode === 'ko');
   if (padL.classList.contains('show') !== show) {
     padL.classList.toggle('show', show); padR.classList.toggle('show', show);
     if (!show) releaseAllTouch();
-    if (TOUCH.kind === 'phone') { TOUCH.pads = show; fit(); }   // スマホは対戦中だけ左右に操作の帯を空ける
+    TOUCH.pads = show; fit();   // スマホ横向きは対戦中だけ左右に操作の帯を空ける
   }
-  if (TOUCH.rotate && G.mode === 'fight' && !G.net && !G.paused) G.paused = true;
 }
 
 /* ---- メインループ（requestAnimationFrame + 固定60fps更新） ---- */
