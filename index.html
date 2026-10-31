@@ -30,8 +30,9 @@
 </head>
 <body>
 <canvas id="game" width="960" height="540"></canvas>
-<div id="padL" class="pad"><div id="bAtk" class="tb">攻撃</div><div id="bGrd" class="tb">ガード<small>直前で弾き</small></div></div>
-<div id="padR" class="pad"><div id="bLeft" class="tb">◀</div><div id="bRight" class="tb">▶</div></div>
+<!-- タッチ操作：padMove（左手・移動）と padAct（右手・攻撃とガード） -->
+<div id="padAct" class="pad"><div id="bAtk" class="tb">攻撃</div><div id="bGrd" class="tb">ガード<small>直前で弾き</small></div></div>
+<div id="padMove" class="pad"><div id="bLeft" class="tb">◀</div><div id="bRight" class="tb">▶</div></div>
 <div id="hint"><b>横向きにすると、大きな画面で遊べます</b><span>このまま縦向きでも遊べます。<br>横にしても画面が回らないときは、<br>端末の「画面の向きのロック」を解除してください。</span></div><script>
 'use strict';
 /* =====================================================================
@@ -1496,7 +1497,7 @@ function renderTitleTouch() {
     tbtn('menu' + i, m.label, W / 2, 200 + i * 70, 480, 60, () => { G.sel = i; G.pressed.add('Enter'); }, { size: 25, primary: i === 0 });
   });
   ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 404, W, 136);
-  txt('右側の ◀ ▶：前進・後退　　左側の［攻撃］［ガード］：斬る・受ける', W / 2, 432, 19, '#ffffff');
+  txt('左側の ◀ ▶：前進・後退　　右側の［攻撃］［ガード］：斬る・受ける', W / 2, 432, 19, '#ffffff');
   txt('ガードは、攻撃が当たる直前に押すと「弾き（パリィ）」になる', W / 2, 466, 17, '#e8d8b0');
   txt('黄ゲージ＝体力　赤ゲージ＝体幹（0で体幹崩し → 致命の一撃のチャンス）', W / 2, 500, 16, '#c8b8a0');
   if (canFullscreen()) tbtn('fs', '全画面', W - 80, 36, 130, 46, goFullscreen, { size: 20, font: FONT_SANS });
@@ -2199,8 +2200,8 @@ window.addEventListener('mousedown', () => Snd.init());
 
 /* =====================================================================
    スマホ・タブレット（タッチ操作）
-   ・右手（画面右側）：◀ ▶ で前進・後退。指を置いたまま左右に滑らせれば、離さずに向きを切り替えられる
-   ・左手（画面左側）：［攻撃］［ガード］。ガードは押している間ずっと構え、攻撃が当たる直前に押せば弾き。
+   ・左手（画面左側）：◀ ▶ で前進・後退。指を置いたまま左右に滑らせれば、離さずに向きを切り替えられる
+   ・右手（画面右側）：［攻撃］［ガード］。ガードは押している間ずっと構え、攻撃が当たる直前に押せば弾き。
      指を滑らせてボタンを移ると、移った先のボタンを押したことになる（親指を転がして素早く切り替えられる）
    ・横向き（スマホ）：操作ボタンを画面の左右の帯に置き、ゲーム画面にかぶらないようにする
    ・縦向き（スマホ・タブレット）、横向き（タブレット）：上にゲーム画面、下に操作ボタンのパネル
@@ -2215,9 +2216,9 @@ const TOUCH = {
   w: 0, h: 0,         // 最後に配置したときの画面の大きさ（向きの変化を確実に拾うため毎フレーム比べる）
 };
 const $id = id => document.getElementById(id);
-const padL = $id('padL'), padR = $id('padR'), bAtk = $id('bAtk'), bGrd = $id('bGrd'), bLeft = $id('bLeft'), bRight = $id('bRight');
+const padAct = $id('padAct'), padMove = $id('padMove'), bAtk = $id('bAtk'), bGrd = $id('bGrd'), bLeft = $id('bLeft'), bRight = $id('bRight');
 const hintEl = $id('hint');
-for (const el of [padL, padR, hintEl]) el.style.fontFamily = FONT_SERIF;
+for (const el of [padAct, padMove, hintEl]) el.style.fontFamily = FONT_SERIF;
 function touchDevice() {
   const mq = q => window.matchMedia && window.matchMedia(q).matches;
   return mq('(pointer: coarse)') || (navigator.maxTouchPoints > 0 && !mq('(pointer: fine)'));
@@ -2236,7 +2237,7 @@ const vibrate = ms => { try { if (navigator.vibrate) navigator.vibrate(ms); } ca
 const rectOf = el => el.getBoundingClientRect();
 const centerDist = (el, x, y) => { const r = rectOf(el); return Math.hypot(x - (r.left + r.right) / 2, y - (r.top + r.bottom) / 2); };
 
-// ---- 右手：移動（指が◀側にあるか▶側にあるかで向きが決まる。最後に触れた指を優先） ----
+// ---- 左手：移動（指が◀側にあるか▶側にあるかで向きが決まる。最後に触れた指を優先） ----
 const moveFingers = new Map();
 function updateMove() {
   let dir = 0;
@@ -2245,15 +2246,15 @@ function updateMove() {
   setKey('ArrowLeft', dir < 0); setKey('ArrowRight', dir > 0);
   bLeft.classList.toggle('on', dir < 0); bRight.classList.toggle('on', dir > 0);
 }
-padR.addEventListener('pointerdown', e => {
+padMove.addEventListener('pointerdown', e => {
   e.preventDefault(); Snd.init();
-  try { padR.setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
+  try { padMove.setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
   moveFingers.set(e.pointerId, { x: e.clientX }); updateMove();
 });
-padR.addEventListener('pointermove', e => { const f = moveFingers.get(e.pointerId); if (f) { f.x = e.clientX; updateMove(); } });
-for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) padR.addEventListener(ev, e => { if (moveFingers.delete(e.pointerId)) updateMove(); });
+padMove.addEventListener('pointermove', e => { const f = moveFingers.get(e.pointerId); if (f) { f.x = e.clientX; updateMove(); } });
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) padMove.addEventListener(ev, e => { if (moveFingers.delete(e.pointerId)) updateMove(); });
 
-// ---- 左手：攻撃・ガード（左側の帯／パネル全体が反応範囲。指に一番近いボタンを押したことになる） ----
+// ---- 右手：攻撃・ガード（右側の帯／パネル全体が反応範囲。指に一番近いボタンを押したことになる） ----
 const actFingers = new Map();   // 指 → 'atk' | 'grd'
 const actAt = (x, y) => centerDist(bAtk, x, y) <= centerDist(bGrd, x, y) ? 'atk' : 'grd';
 const fingersOn = b => [...actFingers.values()].filter(v => v === b).length;
@@ -2267,18 +2268,18 @@ function actRelease(b) {
   else if (!fingersOn('grd')) keyUp('KeyX');
 }
 function updateActView() { bAtk.classList.toggle('on', fingersOn('atk') > 0); bGrd.classList.toggle('on', fingersOn('grd') > 0); }
-padL.addEventListener('pointerdown', e => {
+padAct.addEventListener('pointerdown', e => {
   e.preventDefault(); Snd.init();
-  try { padL.setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
+  try { padAct.setPointerCapture(e.pointerId); } catch (err) { /* 無視 */ }
   const b = actAt(e.clientX, e.clientY);
   actFingers.set(e.pointerId, b); actPress(b); updateActView();
 });
-padL.addEventListener('pointermove', e => {
+padAct.addEventListener('pointermove', e => {
   const cur = actFingers.get(e.pointerId); if (!cur) return;
   const b = actAt(e.clientX, e.clientY);
   if (b !== cur) { actFingers.set(e.pointerId, b); actRelease(cur); actPress(b); updateActView(); }
 });
-for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) padL.addEventListener(ev, e => {
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) padAct.addEventListener(ev, e => {
   const cur = actFingers.get(e.pointerId); if (!cur) return;
   actFingers.delete(e.pointerId); actRelease(cur); updateActView();
 });
@@ -2344,11 +2345,11 @@ function fit() {
     // スマホ横向きの対戦中：左右の帯に操作ボタン、真ん中にゲーム画面
     const col = Math.round(clampN(W * 0.19, 118, 200));
     cw = Math.min(W - col * 2, H * 16 / 9); chh = cw * 9 / 16; cx = (W - cw) / 2; cy = (H - chh) / 2;
-    place(padL, 0, 0, col, H); place(padR, W - col, 0, col, H);
+    place(padMove, 0, 0, col, H); place(padAct, W - col, 0, col, H);   // 左の帯：移動、右の帯：攻撃・ガード
     const g = 8, bw = col - g * 2, bh = Math.min((H - g * 3) / 2, bw * 1.15);
-    place(bAtk, g, H - bh * 2 - g * 2, bw, bh); place(bGrd, g, H - bh - g, bw, bh);   // 左：上に攻撃、下にガード
+    place(bAtk, g, H - bh * 2 - g * 2, bw, bh); place(bGrd, g, H - bh - g, bw, bh);   // 右：上に攻撃、下にガード
     const mw = (col - g * 3) / 2, mh = Math.min(H * 0.62, 240);
-    place(bLeft, g, H - mh - g, mw, mh); place(bRight, g * 2 + mw, H - mh - g, mw, mh);   // 右：◀ ▶
+    place(bLeft, g, H - mh - g, mw, mh); place(bRight, g * 2 + mw, H - mh - g, mw, mh);   // 左：◀ ▶
     for (const el of [bAtk, bGrd]) el.style.fontSize = Math.round(clampN(bw * 0.24, 20, 34)) + 'px';
     for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(mw * 0.5, 24, 44)) + 'px';
   } else {
@@ -2361,15 +2362,15 @@ function fit() {
   hintEl.style.display = hintTop >= 0 ? 'flex' : 'none';
   if (hintTop >= 0) place(hintEl, 0, hintTop, W, H - hintTop);
 }
-// 画面下の操作パネル：左半分に［攻撃］［ガード］、右半分の右端寄りに ◀ ▶。親指が届きやすいよう下寄りに置く
+// 画面下の操作パネル：左半分の左端寄りに ◀ ▶、右半分の右端寄りに［ガード］［攻撃］。親指が届きやすいよう下寄りに置く
 function placeBottomPanel(W, H, top, g) {
   const ph = H - top;
-  place(padL, 0, top, W / 2, ph); place(padR, W / 2, top, W / 2, ph);
+  place(padMove, 0, top, W / 2, ph); place(padAct, W / 2, top, W / 2, ph);
   const bw = Math.min((W / 2 - g * 3) / 2, 210);
   const bh = Math.min(ph - g * 2, Math.max(bw, Math.min(bw * 1.8, 260)));
   const by = Math.max(g, ph - bh - Math.max(g * 2, ph * 0.12));
-  place(bAtk, g, by, bw, bh); place(bGrd, g * 2 + bw, by, bw, bh);
-  place(bLeft, W / 2 - g * 2 - bw * 2, by, bw, bh); place(bRight, W / 2 - g - bw, by, bw, bh);
+  place(bLeft, g, by, bw, bh); place(bRight, g * 2 + bw, by, bw, bh);                    // 左手：◀ ▶
+  place(bGrd, W / 2 - g * 2 - bw * 2, by, bw, bh); place(bAtk, W / 2 - g - bw, by, bw, bh); // 右手：ガード（内側）・攻撃（右端）
   for (const el of [bAtk, bGrd]) el.style.fontSize = Math.round(clampN(bw * 0.24, 20, 40)) + 'px';
   for (const el of [bLeft, bRight]) el.style.fontSize = Math.round(clampN(bw * 0.4, 26, 60)) + 'px';
 }
@@ -2383,8 +2384,8 @@ fit();
 function touchFrame() {
   if (TOUCH.on && (window.innerWidth !== TOUCH.w || window.innerHeight !== TOUCH.h)) fit();
   const show = TOUCH.on && (G.mode === 'intro' || G.mode === 'fight' || G.mode === 'ko');
-  if (padL.classList.contains('show') !== show) {
-    padL.classList.toggle('show', show); padR.classList.toggle('show', show);
+  if (padAct.classList.contains('show') !== show) {
+    padAct.classList.toggle('show', show); padMove.classList.toggle('show', show);
     if (!show) releaseAllTouch();
     TOUCH.pads = show; fit();   // スマホ横向きは対戦中だけ左右に操作の帯を空ける
   }
