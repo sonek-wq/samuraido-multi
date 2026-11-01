@@ -31,7 +31,7 @@
 <body>
 <canvas id="game" width="960" height="540"></canvas>
 <!-- タッチ操作：padMove（左手・移動）と padAct（右手・攻撃とガード） -->
-<div id="padAct" class="pad"><div id="bAtk" class="tb">攻撃</div><div id="bGrd" class="tb">ガード<small>直前で弾き</small></div></div>
+<div id="padAct" class="pad"><div id="bAtk" class="tb">攻撃<small>長押しで溜め</small></div><div id="bGrd" class="tb">ガード<small>直前で弾き</small></div></div>
 <div id="padMove" class="pad"><div id="bLeft" class="tb">◀</div><div id="bRight" class="tb">▶</div></div>
 <div id="hint"><b>横向きにすると、大きな画面で遊べます</b><span>このまま縦向きでも遊べます。<br>横にしても画面が回らないときは、<br>端末の「画面の向きのロック」を解除してください。</span></div><script>
 'use strict';
@@ -45,11 +45,11 @@
    ※フレーム数はすべて 60fps 基準
    ===================================================================== */
 
-// 画面（内部はSFC風の低解像度で描画し、3倍に拡大表示）
-const SCREEN = { W: 320, H: 180, SCALE: 3 };
+// 画面（内部はSFC風の低解像度で描画し、4倍に拡大表示。キャラクターが大きく見え、壁も近くなる）
+const SCREEN = { W: 240, H: 135, SCALE: 4 };
 
 // ステージ（LEFT/RIGHT はキャラ中心が移動できる限界＝壁）
-const STAGE = { LEFT: 27, RIGHT: 293, GROUND_Y: 158 };
+const STAGE = { LEFT: 27, RIGHT: 213, GROUND_Y: 113 };
 
 // 移動
 const MOVE = {
@@ -57,8 +57,8 @@ const MOVE = {
   WALK_BACK: 0.9,     // 後退速度 (px/frame)
   FRICTION: 0.82,     // ノックバックの減衰率（1に近いほど遠くまで滑る）
   MIN_DIST: 22,       // キャラ同士の最小距離（重なり防止）
-  START_P: 112,       // プレイヤー初期位置
-  START_C: 208,       // CPU初期位置
+  START_P: 72,        // プレイヤー初期位置
+  START_C: 168,       // CPU初期位置
 };
 
 // 各アクションのフレーム数
@@ -78,10 +78,20 @@ const FRAMES = {
   CLASH: 16,            // 相子の硬直（両者）
   BREAK: 100,           // 体幹ブレイク（棒立ち）時間
   DEATHBLOW_STUN: 34,   // 致命の一撃を受けた後の硬直
-  PARRY_WINDOW: 8,      // 弾きの猶予（攻撃が当たる何フレーム前までのガード入力で弾きになるか）
+  PARRY_WINDOW: 8,      // 弾きの猶予（攻撃が当たる何フレーム前までのガード入力で弾きになるか）。見てから反応できるふつうの攻撃用
+  PARRY_WINDOW_CHARGE: 12, // 溜め斬りへの弾きの猶予。離す瞬間は見てから反応できず「読み」で押すしかないので、少し長くする
+                           // （ふつうの攻撃は据え置き＝相手を待って弾くだけの戦い方は強くならない）
   PARRY_SPAM_LOCK: 16,  // 連打対策：直前のガード入力からこのフレーム以内の再入力は弾き判定なし
+  CHARGE_FORGIVE: 12,   // 相手が溜めに入ってからこのフレーム以内に押したガード（ふつうの拍子に合わせた入力）は連打に数えない
+                        // ＝ふつうの攻撃だと思って弾きを狙い、溜めだと気づいてから押し直しても、連打対策に邪魔されない
   GUARD_MIN: 10,        // ガードボタンを一瞬押しただけでも維持されるガード時間
   INTRO: 110,           // 開始演出
+  // 溜め斬り：攻撃ボタンを押し続けると、振りかぶった姿勢のまま「溜め」に入る。離した瞬間に斬り下ろす
+  CHARGE_AT: 12,        // 振りかぶりのこのフレームで、まだ押していれば溜めに入る（＝ふつうの攻撃は押して離すまで0.2秒以内）
+  CHARGE_FULL: 34,      // ここまで溜めると威力が最大（刀がきらめいて知らせる）
+  CHARGE_MAX: 48,       // 溜めていられる最長フレーム（これを過ぎると自動で斬る。きらめきから約0.25秒後）
+                        // 離してから当たるまでは ATK_STARTUP - CHARGE_AT ＝ 6フレーム（0.1秒）。人は見てから反応できない
+                        // ＝ 溜めは「いつ斬るか」の読み合いを生む。ただし溜め中は一歩も動けず、間合いを外されると空振りする
 };
 const ATK_TOTAL = FRAMES.ATK_STARTUP + FRAMES.ATK_ACTIVE + FRAMES.ATK_RECOVERY;
 
@@ -111,7 +121,8 @@ const STATS = { HP_MAX: 100, POSTURE_MAX: 100 };
 // 体力ダメージ
 const DAMAGE = {
   HIT_HP: 10,        // 通常ヒット
-  DEATHBLOW_HP: 55,  // 体幹ブレイク中に斬られた時（致命の一撃）
+  DEATHBLOW_MIN: 30, // 致命の一撃（体幹ブレイク中に斬られた時）：まったく溜めていない場合
+  DEATHBLOW_MAX: 50, // 致命の一撃：溜めきった場合。間は溜めた長さに比例して直線的に増える（溜め0.77秒で最大）
 };
 
 // 体幹
@@ -124,7 +135,8 @@ const POSTURE = {
   PARRY_TO_ATTACKER: 24,   // 弾かれた側（攻撃側）への体幹ダメージ
   PARRY_TO_DEFENDER: 2,    // 弾いた側の体幹ダメージ（ごくわずか）
   CLASH: 18,               // 相子の体幹ダメージ（両者）
-  WALL_MULT: 1.25,         // 壁を背負っている時の体幹ダメージ倍率（端は不利）
+  WALL_MULT: 1.5,          // 壁際の体幹ダメージ倍率（体力ダメージは変わらない）。斬られた／ガード／弾き／相子のすべてで、
+                           // 壁を背負っている時だけでなく、押し返しで壁にぶつかる距離にいる時も同じ（端は不利）
   REGEN_DELAY: 60,         // 体幹ダメージ後、回復が始まるまで
   REGEN_DELAY_PER_CHAIN: 20, // 連続ガード数に応じて回復開始がさらに遅れる
   REGEN_IDLE: 0.30,        // 何もしていない時の回復量/frame（満タンまで約5.5秒）
@@ -132,6 +144,14 @@ const POSTURE = {
   REGEN_GUARD: 0.06,       // ガードを構えている間の回復量（ガン待ち対策：ほぼ回復しない）
   REGEN_HP_SCALE: 0.5,     // 体力が減るほど体幹の回復が遅くなる度合い
   AFTER_BREAK: 30,         // 体幹ブレイク明けの体幹ダメージ蓄積量（ゲージ残り70%から再開）
+};
+
+// 溜め斬りの威力（溜めた長さ 0〜CHARGE_FULL に比例して上乗せ。溜めきると×(1＋値)）
+const CHARGE = {
+  HP: 0.6,          // 体力ダメージ（10 → 最大16）
+  POSTURE: 0.8,     // 斬られた／ガードさせた時の体幹ダメージ（ガード14 → 最大25）
+  PARRY_RISK: 0.5,  // 弾かれた時に自分が受ける体幹ダメージ（24 → 最大36）＝読まれた時の代償も大きい
+  KNOCK: 0.4,       // ノックバック
 };
 
 // CPUのAIパラメータ（下の STAGES で対戦相手ごとに設定）
@@ -147,14 +167,18 @@ const POSTURE = {
 //  counter      : 自分が弾いた直後に反撃する確率
 //  pressure     : ガードさせた後に連続で攻め立てる確率
 //  breakPunish  : 体幹ブレイクした相手を斬りに行く確率
-//  breakDelay   : ブレイクした相手へ斬りに行くまでの迷い(フレーム)
+//  breakDelay   : ブレイクした相手へ斬りに行くまでの迷い(フレーム)。charge が0でない相手は、間に合う分だけ溜めて斬る
 //  retreat      : 後退を選ぶ確率
 //  interval     : 行動方針の切り替え間隔(フレーム)
 //  antiTurtle   : ガン待ちする相手を積極的に攻める度合い
 //  corner       : 壁際の意識（自分が端なら脱出、相手が端なら攻め立てる）
 //  bait         : 相手がガードを押した直後（連打対策で弾きが出ない時間）を狙って斬り込む確率（省略時0）
-//  postureTaken : CPUが受ける体幹ダメージの倍率（省略時1。小さいほど体幹が堅い）
-//  hpTaken      : CPUが受ける体力ダメージの倍率（省略時1。小さいほど打たれ強い）
+//  charge       : 攻撃を溜め斬りにする確率（省略時0）
+//  evade        : 相手の溜めを見た時、後ろへ下がって間合いを外す確率（省略時0）
+//  read         : 相手の溜めに対し、ガードを押しっぱなしにせず「離す瞬間」を読んで弾きを狙う確率（省略時0）
+//  feint        : 自分が溜めている時、相手がガードを押したのを見てすかさず斬る確率（省略時0）
+//  space        : 場所取りの強さ 0〜1（省略時0）。高いほど壁を背負うのを嫌って早めに押し返し、相手を壁際へ押し込もうとする
+//  sense        : 相手が溜めを離した瞬間を見てから弾きを合わせ直す確率（省略時0。reaction が5以下の相手しか間に合わない）
 
 // 配色
 const PAL_P = {
@@ -171,8 +195,10 @@ const PAL_C = {
 };
 
 // 六番勝負：対戦相手（この順に戦う）
-//  第二〜五戦は第一戦と第六戦の間を補間し、強さの異なる基準AI3種の平均勝率が
-//  100% → 80% → 60% → 40% → 20% → 0% と均等に下がるようシミュレーションで調整済み
+//  CPUの強さは「操作の上手さ」だけで決まる（体力・体幹・攻撃力はプレイヤーと同じ）。
+//  第二〜五戦は、第一戦と第六戦のAIパラメータをそれぞれ補間した値（補間の割合は各戦の見出しに記載）。
+//  補間の割合は、強さの異なる基準AI3種（溜め斬りも使う）の平均勝率が、
+//  およそ 100% → 86% → 50% → 16% → 5% → 0% と下がるようシミュレーションで決めた
 const STAGES = [
   {
     title: '道場の門下生',
@@ -182,51 +208,51 @@ const STAGES = [
       preGuard: 0.35, holdChance: 0.35, attack: 0.010, jitter: 24,
       punish: 0.12, counter: 0.12, pressure: 0.05, breakPunish: 0.5, breakDelay: 50,
       retreat: 0.20, interval: 40, antiTurtle: 0.0, corner: 0.0,
-      bait: 0, postureTaken: 1.15, hpTaken: 1.1,
+      bait: 0, charge: 0, evade: 0, read: 0, feint: 0, sense: 0, space: 0,
     },
   },
   {
-    title: '腕自慢の浪人',
+    title: '腕自慢の浪人',   // 補間 30%
     pal: { kim: '#3f7a3a', kimD: '#25501f', kimL: '#64a85a' },
     ai: {
       reaction: 16, guardChance: 0.51, parryChance: 0.33, parryError: 4,
-      preGuard: 0.25, holdChance: 0.26, attack: 0.031, jitter: 16.9,
+      preGuard: 0.25, holdChance: 0.25, attack: 0.031, jitter: 16.9,
       punish: 0.38, counter: 0.38, pressure: 0.33, breakPunish: 0.65, breakDelay: 35,
-      retreat: 0.15, interval: 31, antiTurtle: 0.29, corner: 0.29,
-      bait: 0.27, postureTaken: 1.02, hpTaken: 1.01,
+      retreat: 0.15, interval: 30, antiTurtle: 0.30, corner: 0.30,
+      bait: 0.27, charge: 0.15, evade: 0.12, read: 0.30, feint: 0.24, sense: 0.30, space: 0.30,
     },
   },
   {
-    title: '流派の師範代',
+    title: '流派の師範代',   // 補間 53%
     pal: { kim: '#6a3a8f', kimD: '#44205e', kimL: '#9a64c2' },
     ai: {
-      reaction: 12, guardChance: 0.64, parryChance: 0.52, parryError: 3,
-      preGuard: 0.18, holdChance: 0.19, attack: 0.044, jitter: 12.3,
-      punish: 0.55, counter: 0.55, pressure: 0.52, breakPunish: 0.74, breakDelay: 26,
-      retreat: 0.12, interval: 24, antiTurtle: 0.49, corner: 0.49,
-      bait: 0.44, postureTaken: 0.93, hpTaken: 0.95,
+      reaction: 11, guardChance: 0.67, parryChance: 0.55, parryError: 3,
+      preGuard: 0.16, holdChance: 0.18, attack: 0.047, jitter: 11.3,
+      punish: 0.59, counter: 0.59, pressure: 0.55, breakPunish: 0.77, breakDelay: 23,
+      retreat: 0.11, interval: 23, antiTurtle: 0.53, corner: 0.53,
+      bait: 0.48, charge: 0.27, evade: 0.21, read: 0.53, feint: 0.42, sense: 0.53, space: 0.53,
     },
   },
   {
-    title: '奥義を継ぐ者',
+    title: '奥義を継ぐ者',   // 補間 75%
     pal: { kim: '#8a7a2a', kimD: '#5a4e14', kimL: '#b8a84a', hak: '#2a2a22' },
     ai: {
-      reaction: 8, guardChance: 0.78, parryChance: 0.70, parryError: 2,
-      preGuard: 0.11, holdChance: 0.13, attack: 0.058, jitter: 7.6,
-      punish: 0.72, counter: 0.72, pressure: 0.70, breakPunish: 0.84, breakDelay: 16,
-      retreat: 0.08, interval: 18, antiTurtle: 0.68, corner: 0.68,
-      bait: 0.62, postureTaken: 0.84, hpTaken: 0.90,
+      reaction: 6, guardChance: 0.82, parryChance: 0.76, parryError: 2,
+      preGuard: 0.09, holdChance: 0.11, attack: 0.062, jitter: 6.0,
+      punish: 0.78, counter: 0.78, pressure: 0.76, breakPunish: 0.88, breakDelay: 12,
+      retreat: 0.07, interval: 16, antiTurtle: 0.75, corner: 0.75,
+      bait: 0.68, charge: 0.38, evade: 0.30, read: 0.75, feint: 0.60, sense: 0.75, space: 0.75,
     },
   },
   {
-    title: '剣の聖',
+    title: '剣の聖',   // 補間 92%
     pal: { kim: '#d8d4c8', kimD: '#9a968a', kimL: '#ffffff', hak: '#4a4a5a', hakD: '#2e2e3a', hakL: '#6a6a7a', obi: '#5a2020' },
     ai: {
-      reaction: 6, guardChance: 0.85, parryChance: 0.79, parryError: 1,
-      preGuard: 0.08, holdChance: 0.10, attack: 0.065, jitter: 5.3,
-      punish: 0.81, counter: 0.81, pressure: 0.79, breakPunish: 0.89, breakDelay: 11,
-      retreat: 0.07, interval: 15, antiTurtle: 0.78, corner: 0.78,
-      bait: 0.70, postureTaken: 0.80, hpTaken: 0.87,
+      reaction: 3, guardChance: 0.95, parryChance: 0.93, parryError: 0,
+      preGuard: 0.03, holdChance: 0.05, attack: 0.075, jitter: 1.9,
+      punish: 0.93, counter: 0.93, pressure: 0.93, breakPunish: 0.96, breakDelay: 4,
+      retreat: 0.04, interval: 10, antiTurtle: 0.92, corner: 0.92,
+      bait: 0.83, charge: 0.46, evade: 0.37, read: 0.92, feint: 0.74, sense: 0.92, space: 0.92,
     },
   },
   {
@@ -237,7 +263,7 @@ const STAGES = [
       preGuard: 0.0, holdChance: 0.03, attack: 0.08, jitter: 0,
       punish: 1.0, counter: 1.0, pressure: 1.0, breakPunish: 1.0, breakDelay: 0,
       retreat: 0.03, interval: 8, antiTurtle: 1.0, corner: 1.0,
-      bait: 0.9, postureTaken: 0.7, hpTaken: 0.8,
+      bait: 0.9, charge: 0.50, evade: 0.40, read: 1.0, feint: 0.80, sense: 1.0, space: 1.0,
     },
   },
 ];
@@ -386,6 +412,23 @@ const Snd = {
     this.tone({ f0: 80, f1: 35, dur: 0.5, peak: 0.8 });
   },
   swing() { this.noise({ dur: 0.13, peak: 0.22, type: 'bandpass', f0: 900, f1: 3200, q: 1.4 }); },
+  glint() { // 溜めに入った合図：鯉口を切るような小さな「チャキ」
+    this.noise({ dur: 0.02, peak: 0.25, type: 'highpass', f0: 5000 });
+    this.tone({ type: 'triangle', f0: 3100, dur: 0.07, peak: 0.07, send: 0.1 });
+    this.tone({ type: 'triangle', t: 0.035, f0: 4200, dur: 0.06, peak: 0.05, send: 0.1 });
+  },
+  glintFull() { // 溜めきった合図：刃が光る「キィン」（相手への予告でもある）
+    this.metal(2640, [1, 1.5, 2.01], { decay: 0.5, peak: 0.08, send: 0.45 });
+    this.noise({ dur: 0.04, peak: 0.15, type: 'highpass', f0: 6000 });
+  },
+  heavy() { // 溜めきった斬撃が入った：腹に響く追加の衝撃
+    this.tone({ f0: 120, f1: 40, dur: 0.4, peak: 0.85, dist: true, filter: { type: 'lowpass', f: 500 } });
+    this.noise({ dur: 0.25, peak: 0.5, type: 'lowpass', f0: 2500, f1: 150, send: 0.25 });
+  },
+  clang(k = 1) { // 溜め斬りをガードした：重い金属音
+    this.metal(420, [1, 1.37, 2.08], { decay: 0.35, peak: 0.12 * k, send: 0.25, type: 'triangle' });
+    this.tone({ f0: 140, f1: 60, dur: 0.2, peak: 0.5 * k });
+  },
   taiko(t = 0) {
     this.tone({ t, f0: 95, f1: 50, dur: 0.55, peak: 1.0 });
     this.noise({ t, dur: 0.06, peak: 0.4, type: 'lowpass', f0: 500 });
@@ -429,6 +472,8 @@ const who = f => (f.isPlayer ? 1 : 2);
 // 出来事の種類ごとに一度だけ演出する版
 const vBreak = f => visual(`break:${G.frame}:${who(f)}`, () => breakPosture(f));
 const vKill = f => visual(`kill:${G.frame}:${who(f)}`, () => kill(f));
+const POPUP_SCALE = 1.3;
+const POPUP_Y = () => STAGE.GROUND_Y - 60;   // 「弾き！」「相子！」などを出す高さ（侍の頭のすぐ上。表示中に少し浮き上がる）     // 「弾き！」などの文字の拡大率（キャラクターの拡大に合わせる）
 const DMG_NUM_LIFE = 80;     // 減少量表示の表示時間
 const DMG_NUM_MERGE = 50;    // この時間内の連続ダメージは合算して表示
 // ゲージの減少量「－◯◯」を登録（短時間の連続ダメージは合算）
@@ -489,17 +534,15 @@ class Fighter {
     this.x = this.startX; this.vx = 0; this.facing = this.isPlayer ? 1 : -1;
     this.hp = STATS.HP_MAX; this.hpView = this.hp; this.posture = 0; this.postureView = 0;
     this.state = 'idle'; this.timer = 0; this.dur = 0;
-    this.input = { dir: 0, guard: false };
+    this.input = { dir: 0, guard: false, atk: false };
     this.tapAtk = false; this.tapGuard = false; this.parryIntent = true;
     this.atkBuffer = 0; this.atkHit = false; this.atkId = 0; this.atkStartFrame = -999;
+    this.charging = false; this.chargeT = 0; this.chargeLv = 0; this.chargeStart = -999; // 溜め中か／溜めたフレーム数／溜めの強さ(0〜1)／溜めに入ったフレーム
     this.guardPressFrame = -999; this.lastGuardPress = -999; this.parryEligible = false; this.guardMin = 0;
     this.guardChain = 0; this.chainTimer = 0; this.regenDelay = 0;
     this.walkCycle = 0; this.moveDir = 0; this.flash = 0;
     this.stats = { hits: 0, parries: 0, deathblows: 0, clashes: 0, guards: 0 };
-    this.postureTaken = 1; // 受ける体幹ダメージの倍率（難易度でCPUのみ変更）
-    this.hpTaken = 1;      // 受ける体力ダメージの倍率（難易度でCPUのみ変更）
   }
-  setState(s, dur = 0) { this.state = s; this.timer = 0; this.dur = dur; }
   phase() {
     if (this.state !== 'attack') return null;
     if (this.timer < F.ATK_STARTUP) return 'startup';
@@ -514,12 +557,12 @@ class Fighter {
   wallBehind() { return this.facing > 0 ? this.x <= STAGE.LEFT + 2 : this.x >= STAGE.RIGHT - 2; }
   loseHP(v) {
     const before = this.hp;
-    this.hp = Math.max(0, this.hp - Math.round(v * this.hpTaken));
+    this.hp = Math.max(0, this.hp - Math.round(v));
     dmgNum(this, 'hp', before - this.hp);
   }
   addPosture(v) {
     const before = this.posture;
-    this.posture = Math.min(STATS.POSTURE_MAX, this.posture + v * this.postureTaken);
+    this.posture = Math.min(STATS.POSTURE_MAX, this.posture + v);
     dmgNum(this, 'posture', this.posture - before);
     this.regenDelay = Math.max(this.regenDelay, POSTURE.REGEN_DELAY + this.guardChain * POSTURE.REGEN_DELAY_PER_CHAIN);
     return this.posture >= STATS.POSTURE_MAX;
@@ -527,7 +570,9 @@ class Fighter {
   startAttack(frame) {
     this.setState('attack');
     this.atkHit = false; this.atkId++; this.atkStartFrame = frame; this.atkBuffer = 0; this.guardMin = 0;
+    this.charging = false; this.chargeT = 0; this.chargeLv = 0; this.chargeStart = -999;
   }
+  setState(s, dur = 0) { this.state = s; this.timer = 0; this.dur = dur; if (s !== 'attack') this.charging = false; }
   update(opp, frame) {
     // 常に相手の方を向く
     if (opp.x !== this.x) this.facing = opp.x > this.x ? 1 : -1;
@@ -537,7 +582,9 @@ class Fighter {
       this.tapGuard = false;
       if (this.state !== 'dead' && this.state !== 'broken' && this.state !== 'win') {
         // 連打対策：直前の入力から近すぎると弾き判定を与えない
-        this.guardPressFrame = (frame - this.lastGuardPress < F.PARRY_SPAM_LOCK) ? -999 : frame;
+        // ただし相手が溜めに入る前後（ふつうの拍子）に押した分は数えない
+        const forgiven = opp.state === 'attack' && opp.chargeStart >= 0 && this.lastGuardPress <= opp.chargeStart + F.CHARGE_FORGIVE;
+        this.guardPressFrame = (frame - this.lastGuardPress < F.PARRY_SPAM_LOCK && !forgiven) ? -999 : frame;
         this.lastGuardPress = frame;
         this.parryEligible = this.isPlayer ? true : this.parryIntent;
         this.guardMin = F.GUARD_MIN;
@@ -555,6 +602,18 @@ class Fighter {
         if (this.timer >= this.dur) this.setState('idle');
         break;
       case 'attack':
+        if (this.charging) {
+          // 溜め中：振りかぶったまま止まる（その場から動けない）。離すか、溜めきると斬り下ろしへ
+          this.timer = F.CHARGE_AT; this.chargeT++;
+          if (this.chargeT === F.CHARGE_FULL) visual(`chargefull:${frame}:${who(this)}`, () => chargeGlint(this, true));
+          if (!this.input.atk || this.chargeT >= F.CHARGE_MAX) { this.charging = false; this.chargeLv = Math.min(1, this.chargeT / F.CHARGE_FULL); }
+          break;
+        }
+        if (this.timer === F.CHARGE_AT && this.input.atk && this.chargeT === 0) {
+          this.charging = true; this.chargeStart = frame;
+          visual(`charge:${frame}:${who(this)}`, () => chargeGlint(this, false));
+          break;
+        }
         if (this.timer >= ATK_TOTAL) this.setState('idle');
         else {
           if (this.timer >= F.ATK_LUNGE_START && this.timer < F.ATK_LUNGE_END && Math.abs(opp.x - this.x) > MOVE.MIN_DIST + 1)
@@ -614,6 +673,10 @@ function knock(f, v) { f.vx = -f.facing * v; } // 相手と反対方向へ
    CPU AI
    プレイヤーの状態を reaction フレーム遅れで「認識」して行動を決める
    ===================================================================== */
+// 背後の壁までの距離（x にいる侍が、相手 ox の方を向いているとして）
+const roomOf = (x, ox) => (ox > x ? x - STAGE.LEFT : STAGE.RIGHT - x);
+// ※AIの判断に使う距離のしきい値は、戦う場所の広さ（壁から壁まで186px）に合わせてある
+const roomBehind = f => (f.facing > 0 ? f.x - STAGE.LEFT : STAGE.RIGHT - f.x);
 class AI {
   constructor(params) {
     this.P = params;
@@ -621,9 +684,15 @@ class AI {
     this.mode = 'approach'; this.modeTimer = 0; this.targetDist = RANGE.ATK_REACH + 6; this.holdGuard = false;
     this.lastGuard = false; this.prevOpKey = ''; this.punish = false; this.punishDelay = 0;
     this.counter = false; this.prevMeState = ''; this.oppGuardTime = 0; this.pressAtk = -1;
+    this.normalN = 0; this.parriedN = 0;   // ふつうの斬撃を振った回数／そのうち弾かれた回数（相手の弾きの上手さを測る）
+    this.holdUntil = -1; this.tempo = []; this.chargeSeen = -1; this.releaseSeen = -1; this.feintSeen = -1; this.now = 0;
   }
   record(p) {
-    this.hist.push({ x: p.x, state: p.state, phase: p.phase(), atkId: p.atkId, atkStart: p.atkStartFrame, wall: p.wallBehind(), guardPress: p.lastGuardPress, frame: G.frame });
+    // hitAt：この攻撃が当たるフレームの見込み（溜め中は「いつ離すか」が分からないので null）
+    const live = p.state === 'attack' && p.phase() !== 'recovery';
+    const hitAt = live && !p.charging ? G.frame + Math.max(0, F.ATK_STARTUP - p.timer) : null;
+    this.hist.push({ x: p.x, state: p.state, phase: p.phase(), atkId: p.atkId, atkStart: p.atkStartFrame, wall: p.wallBehind(), guardPress: p.lastGuardPress, frame: G.frame,
+      charging: p.charging, chargeT: p.chargeT, hitAt });
     if (this.hist.length > 40) this.hist.shift();
   }
   perceive() {
@@ -635,46 +704,113 @@ class AI {
     if (out.guard && !this.lastGuard) { me.tapGuard = true; me.parryIntent = out.intent; }
     this.lastGuard = out.guard;
     if (out.atk) me.tapAtk = true;
+    me.input.atk = this.now < this.holdUntil;   // 溜め斬り：決めた長さだけ攻撃ボタンを押し続ける
   }
-  chooseMode(me) {
+  // 攻撃する時、溜め斬りにするか（する場合は押し続ける長さも決める）
+  swing(out, op, frame, bias = 1) {
+    out.atk = true;
     const P = this.P;
-    const myWall = me.facing > 0 ? me.x - STAGE.LEFT : STAGE.RIGHT - me.x;
-    if (myWall < 36 && Math.random() < P.corner) { // 端から脱出するため前に出る
-      this.mode = 'approach'; this.targetDist = RANGE.ATK_REACH + 2; this.modeTimer = P.interval; return;
+    let ch = (P.charge || 0) * bias * (op.state === 'guard' ? 2 : 1) * (op.wall ? 1.5 : 1);
+    if (Math.random() < Math.min(0.9, ch)) this.holdUntil = frame + F.CHARGE_AT + randInt(3, F.CHARGE_MAX);
+    else this.normalN++;
+  }
+  chooseMode(me, op) {
+    const P = this.P, C = P.corner, S = P.space || 0;
+    const myRoom = roomBehind(me), opRoom = op ? roomOf(op.x, me.x) : 999;
+    this.noRetreat = false;
+    // 壁際に追い込まれた（強い相手ほど早めに気づく）：前に出続けて体で押し、斬り・弾きで場所を取り返す
+    if (myRoom < 30 + 40 * S && Math.random() < Math.max(S, C * 0.5)) {
+      this.mode = 'push'; this.modeTimer = P.interval + randInt(10, 30);
+      this.stepWalk = Math.round(lerp(8, 16, S)); this.stepPause = Math.round(lerp(14, 0, Math.min(1, S * 1.3))); this.stepT = 0; return;
+    }
+    if (myRoom < 42 && Math.random() < C) { // 壁を背負いかけている：下がらず前に出て、場所を取り返す
+      this.mode = 'approach'; this.targetDist = RANGE.ATK_REACH + 2; this.modeTimer = P.interval; this.noRetreat = true; return;
+    }
+    // 相手のほうが壁に近い：数歩進んでは止まり、じわじわ壁へ押し込む（強い相手ほど広い範囲で、間を詰めて押し込む）
+    if (opRoom < 98 + 40 * S && opRoom < myRoom + 20 * S && Math.random() < Math.max(C, S)) {
+      this.mode = 'press'; this.targetDist = RANGE.ATK_REACH + 2 - 10 * S; this.modeTimer = P.interval + randInt(10, 40);
+      this.stepWalk = randInt(8, 14); this.stepPause = Math.round(randInt(8, 16) * Math.max(0, 1 - 1.2 * S)); this.stepT = 0; return;
     }
     const r = Math.random();
-    if (r < P.retreat) { this.mode = 'back'; this.modeTimer = 12 + randInt(0, 20); }
+    const backOK = myRoom > Math.max(56, 40 + 80 * S) || Math.random() > Math.max(C, S);   // 背後に余裕がなければ、下がる選択はしない
+    if (r < P.retreat && backOK) { this.mode = 'back'; this.modeTimer = 12 + randInt(0, 20); }
     else if (r < P.retreat + P.holdChance) { this.mode = 'hold'; this.holdGuard = Math.random() < P.preGuard; this.modeTimer = P.interval + randInt(0, 30); }
-    else { this.mode = 'approach'; this.targetDist = RANGE.ATK_REACH + 6 + (Math.random() * 2 - 1) * P.jitter; this.modeTimer = P.interval + randInt(0, P.interval); }
+    else {
+      this.mode = 'approach'; this.targetDist = RANGE.ATK_REACH + 6 + (Math.random() * 2 - 1) * P.jitter; this.modeTimer = P.interval + randInt(0, P.interval);
+      this.noRetreat = (myRoom < Math.max(56, 40 + 80 * S) || opRoom < myRoom) && Math.random() < Math.max(C, S);   // 取った場所は譲らない
+    }
   }
   think(me, frame) {
     const P = this.P, op = this.perceive();
     const out = { dir: 0, guard: false, atk: false, intent: false };
+    this.now = frame;
+    if (['hitstun', 'deflected', 'clash', 'broken', 'guardstun'].includes(me.state)) this.holdUntil = -1; // 崩されたら溜めの予定は捨てる
     if (!op) { this.emit(me, out); return; }
     const dist = Math.abs(op.x - me.x);
     const reach = RANGE.ATK_REACH + 8;
+    const myRoom = roomBehind(me), opRoom = roomOf(op.x, me.x);   // 自分／相手の背後の壁までの距離
 
     if (op.state === 'guard' || op.state === 'guardstun') this.oppGuardTime++; else this.oppGuardTime = 0;
     if (me.state === 'parry' && this.prevMeState !== 'parry') this.counter = Math.random() < P.counter;
+    if (me.state === 'deflected' && this.prevMeState !== 'deflected' && me.chargeLv < 0.25) this.parriedN++;
     this.prevMeState = me.state;
+    // 相手がふつうの斬撃をよく弾くなら、強い相手ほど溜め斬りを増やし、ふつうの斬撃を控える
+    const parryRate = this.parriedN / Math.max(4, this.normalN), adapt = (P.space || 0) * parryRate;
 
     // ---- 1. 相手の攻撃に反応（ガード / 弾き） ----
     const committed = me.state === 'attack' && me.phase() !== 'recovery';
+    const planFor = hitFrame => {   // 当たる時刻が分かっている攻撃へのガード／弾きの段取り
+      if (Math.random() < P.parryChance) {
+        const press = hitFrame - randInt(2, F.PARRY_WINDOW - 2) + randInt(-P.parryError, P.parryError);
+        this.plan = { type: 'parry', press: Math.max(press, frame), end: hitFrame + F.ATK_ACTIVE + 6, pressed: false };
+      } else this.plan = { type: 'guard', end: hitFrame + F.ATK_ACTIVE + 6 };
+    };
     if (op.state === 'attack' && op.phase !== 'recovery' && op.atkId !== this.handledAtk) {
       this.handledAtk = op.atkId;
-      if (!committed && dist <= RANGE.ATK_REACH + 18 && Math.random() < P.guardChance) {
-        const hitFrame = op.atkStart + F.ATK_STARTUP;
-        if (Math.random() < P.parryChance) {
-          const press = hitFrame - randInt(2, F.PARRY_WINDOW - 2) + randInt(-P.parryError, P.parryError);
-          this.plan = { type: 'parry', press: Math.max(press, frame), end: hitFrame + F.ATK_ACTIVE + 6, pressed: false };
-        } else {
-          this.plan = { type: 'guard', end: hitFrame + F.ATK_ACTIVE + 6 };
-        }
+      // ふつうの拍子で来ると見込んで構える（相手が溜めれば、この読みは外れる）
+      if (!committed && op.hitAt !== null && dist <= RANGE.ATK_REACH + 18 && Math.random() < P.guardChance) planFor(op.hitAt);
+    }
+    // 1b. 相手が溜めに入った：間合いを外す／ガードを固める／離す瞬間を読んで弾く
+    if (op.state === 'attack' && op.charging && op.atkId !== this.chargeSeen) {
+      this.chargeSeen = op.atkId;
+      if (!committed) {
+        const r = Math.random();
+        if (!me.wallBehind() && dist < RANGE.ATK_REACH + 24 && r < (P.evade || 0) && (myRoom > 32 + 60 * (P.space || 0) || Math.random() > P.corner)) this.plan = { type: 'evade', atkId: op.atkId, end: frame + F.CHARGE_MAX + 20 };
+        else if (Math.random() < P.guardChance) {
+          if (Math.random() < (P.read || 0)) {
+            // 離す拍子を読む：相手がこれまでに溜めた長さを覚えていて、その中から一つを狙う（同じ拍子ばかりだと見切られる）
+            const start = op.atkStart + F.CHARGE_AT;
+            const hold = this.tempo.length ? pick(this.tempo) + randInt(-2, 2) : randInt(4, F.CHARGE_MAX - 6);
+            const press = start + hold + (F.ATK_STARTUP - F.CHARGE_AT) - randInt(2, F.PARRY_WINDOW_CHARGE - 2);
+            this.plan = { type: 'parry', press: Math.max(frame, press), end: frame + F.CHARGE_MAX + 14, pressed: false, atkId: op.atkId };
+          }
+          else this.plan = { type: 'guard', atkId: op.atkId, end: frame + F.CHARGE_MAX + 14 };
+        } else this.plan = null;
       }
     }
+    // 1c. 溜めを離した瞬間が見えた：反応が間に合う相手だけ、正確に弾きを合わせ直す
+    if (op.state === 'attack' && !op.charging && op.chargeT > 0 && op.hitAt !== null && op.atkId !== this.releaseSeen) {
+      this.releaseSeen = op.atkId;
+      this.tempo.push(op.chargeT); if (this.tempo.length > 6) this.tempo.shift();
+      if (!committed && op.hitAt - frame >= 1 && Math.random() < (P.sense || 0)) planFor(op.hitAt);
+    }
+    // 1d. 自分が溜めている時：相手がガードを押したのが見えたら、すかさず斬る（弾きの拍子を外す）。
+    //     相手が斬りかかってきたら、溜めを解き放って先に斬る
+    if (me.charging) {
+      if (op.guardPress !== this.feintSeen && op.frame - op.guardPress < 3 && op.frame - op.guardPress >= 0) {
+        this.feintSeen = op.guardPress;
+        if (Math.random() < (P.feint || 0)) this.holdUntil = frame;
+      }
+      if (op.state === 'attack' && op.phase === 'startup' && !op.charging) this.holdUntil = Math.min(this.holdUntil, frame);
+    }
+    // 溜めへの備えは、その攻撃が終わったら（または別の攻撃になったら）解く
+    if (this.plan && this.plan.atkId !== undefined && (op.atkId !== this.plan.atkId || op.state !== 'attack' || op.phase === 'recovery')) this.plan = null;
     if (this.plan) {
       if (frame > this.plan.end) this.plan = null;
-      else {
+      else if (this.plan.type === 'evade') {
+        if (!me.wallBehind()) out.dir = -me.facing;
+        this.emit(me, out); return;
+      } else {
         if (this.plan.type === 'parry') {
           if (!this.plan.pressed) {
             // 押しっぱなしでは弾きにならないので、一度離してからタイミングよく押す
@@ -694,13 +830,24 @@ class AI {
     const opKey = op.state + (op.phase || '') + op.atkId;
     if (opKey !== this.prevOpKey) {
       this.prevOpKey = opKey;
-      if (op.state === 'broken') { this.punish = Math.random() < P.breakPunish; this.punishDelay = P.breakDelay; }
+      if (op.state === 'broken') { this.punish = Math.random() < P.breakPunish; this.punishDelay = P.breakDelay; this.brokenSeen = op.frame; }
       else if (op.state === 'deflected' || (op.state === 'attack' && op.phase === 'recovery')) { this.punish = Math.random() < P.punish; this.punishDelay = 0; }
       else this.punish = false;
     }
     if (this.punish) {
       if (this.punishDelay > 0) this.punishDelay--;
-      else if (dist <= reach) { if (me.canAct()) { out.atk = true; if (op.state !== 'broken') this.punish = false; } }
+      else if (dist <= reach) {
+        if (me.canAct()) {
+          out.atk = true;
+          // 致命の一撃は、相手が立ち直る前に間に合う分だけ溜めて斬る（溜めを知る相手のみ）
+          if (op.state === 'broken' && P.charge) {
+            const left = this.brokenSeen + F.BREAK - frame - (F.ATK_STARTUP + 6);
+            const hold = Math.min(F.CHARGE_FULL, left);
+            if (hold > 0) this.holdUntil = frame + F.CHARGE_AT + hold;
+          }
+          if (op.state !== 'broken') this.punish = false;
+        }
+      }
       else out.dir = me.facing;
       this.emit(me, out); return;
     }
@@ -708,7 +855,7 @@ class AI {
     // ---- 4. ガードさせた後の連続攻撃（攻め立て） ----
     if (me.state === 'attack' && me.phase() === 'recovery' && this.pressAtk !== me.atkId && me.timer >= ATK_TOTAL - 4) {
       this.pressAtk = me.atkId;
-      if ((op.state === 'guardstun' || op.state === 'guard' || op.state === 'hitstun') && dist <= reach + 6 && Math.random() < P.pressure) out.atk = true;
+      if ((op.state === 'guardstun' || op.state === 'guard' || op.state === 'hitstun') && dist <= reach + 6 && Math.random() < P.pressure) this.swing(out, op, frame, 0.6);
     }
 
     // ---- 4.5 ガード連打を咎める（押した直後は弾きが出ない時間を狙う） ----
@@ -718,22 +865,56 @@ class AI {
     }
 
     // ---- 5. 立ち回り（間合い管理） ----
-    if (--this.modeTimer <= 0) this.chooseMode(me);
+    if (--this.modeTimer <= 0) this.chooseMode(me, op);
+    const S = P.space || 0;
+    // 壁際では、見てから弾かれやすいふつうの斬撃を控え、拍子の読めない溜め斬りを多めに混ぜる（強い相手ほど）
+    const wallCharge = (1 + 2.5 * S * clamp((70 - myRoom) / 50, 0, 1)) * (1 + 3 * adapt);
+    const attackCheck = (bonus = 1) => {
+      if (dist <= reach && me.canAct()) {
+        let ch = P.attack * bonus * (1 - 0.4 * adapt);
+        if (opRoom < 30) ch *= 1 + P.corner;                               // 相手が壁際なら攻め立てる
+        if (this.oppGuardTime > 45) ch *= 1 + P.antiTurtle * 2.5;         // ガン待ちを崩しに行く
+        if (Math.random() < ch) this.swing(out, op, frame, wallCharge);
+      }
+    };
+    // 追い足：斬った／ガードさせた相手が押し返されたら、その分だけ詰めて場所を奪う
+    const opStun = op.state === 'hitstun' || op.state === 'guardstun' || op.state === 'deflected' || op.state === 'clash';
+    if (opStun && !this.chaseSeen) this.chase = Math.random() < Math.max(P.corner, S);
+    this.chaseSeen = opStun;
+    if (this.chase && opStun && dist > RANGE.ATK_REACH) { out.dir = me.facing; this.emit(me, out); return; }
+    // 場所取り：壁が近づいてきたら前へ出て押し返す。強い相手ほど早めに（中央より手前から）、止まらずに前進し続ける。
+    //   相手に触れるまで詰めれば、体で押して壁から離れられる（相手が斬りかかってきたら、上の段取りでガード／弾き）
+    const zone = 30 + 60 * S;
+    if (S > 0 && myRoom < zone && myRoom < opRoom + 10 && me.canAct() && !(op.state === 'attack' && op.phase !== 'recovery')) {
+      const walkShare = Math.min(1, 0.2 + 1.1 * S);   // 歩いている割合（0.73以上で止まらない）
+      if (dist > MOVE.MIN_DIST + 1 && (frame % 24) < 24 * walkShare) out.dir = me.facing;
+      attackCheck();
+      this.emit(me, out); return;
+    }
     if (this.mode === 'approach') {
       if (dist > this.targetDist + 2) out.dir = me.facing;
-      else if (dist < this.targetDist - 14 && !me.wallBehind()) out.dir = -me.facing;
-      if (dist <= reach && me.canAct()) {
-        let ch = P.attack;
-        if (op.wall) ch *= 1 + P.corner;                                  // 相手が端なら攻め立てる
-        if (this.oppGuardTime > 45) ch *= 1 + P.antiTurtle * 2.5;         // ガン待ちを崩しに行く
-        if (Math.random() < ch) out.atk = true;
-      }
+      else if (dist < this.targetDist - 14 && !me.wallBehind() && !this.noRetreat) out.dir = -me.facing;
+      attackCheck();
+    } else if (this.mode === 'push') {
+      // 押し返し：相手が斬りかかってこない間は前へ出続け、体で押して壁から離れる。間合いに入れば積極的に斬る
+      this.stepT = (this.stepT + 1) % (this.stepWalk + this.stepPause);
+      if (dist > MOVE.MIN_DIST + 1 && this.stepT < this.stepWalk) out.dir = me.facing;
+      attackCheck();
+      if (myRoom > 60 + 40 * S) this.modeTimer = 0;   // 十分に場所を取り返したら、ふだんの立ち回りへ
+    } else if (this.mode === 'press') {
+      // じわじわ詰める：数歩進んでは止まって様子を見る（一気に突っ込まない）。間合いの外側ぎりぎりで止まる
+      this.stepT = (this.stepT + 1) % (this.stepWalk + this.stepPause);
+      // 相手の背後が狭くなったら、強い相手ほど体が触れるまで詰め、そのまま壁へ押し込む
+      const pin = opRoom < 30 + 40 * S && Math.random() < S;
+      if (pin && dist > MOVE.MIN_DIST + 1) out.dir = me.facing;
+      else if (dist > this.targetDist && this.stepT < this.stepWalk) out.dir = me.facing;
+      attackCheck();
     } else if (this.mode === 'hold') {
       if (this.holdGuard && dist < 90) out.guard = true;
-      else if (dist <= reach && Math.random() < P.attack * 0.5) out.atk = true;
+      else if (dist <= reach && Math.random() < P.attack * 0.5) this.swing(out, op, frame);
       if (dist > 110) out.dir = me.facing;
     } else if (this.mode === 'back') {
-      if (me.wallBehind()) this.modeTimer = 0; else out.dir = -me.facing;
+      if (me.wallBehind() || myRoom < 30 + 60 * S || (myRoom < 35 && Math.random() < P.corner * 0.2)) this.modeTimer = 0; else out.dir = -me.facing;
     }
     this.emit(me, out);
   }
@@ -783,38 +964,43 @@ function strike(a, d) {
   const guarding = d.state === 'guard' || d.state === 'guardstun' || d.state === 'parry';
   if (guarding) {
     const dt = G.frame - d.guardPressFrame;
-    if (d.parryEligible && dt >= 0 && dt <= F.PARRY_WINDOW) visual(sig('parry'), () => doParry(a, d));
+    if (d.parryEligible && dt >= 0 && dt <= parryWindow(a)) visual(sig('parry'), () => doParry(a, d));
     else visual(sig('guard'), () => doGuard(a, d));
   } else visual(sig('hit'), () => doHit(a, d));
 }
 
+// 弾きの猶予：溜め斬り（一度でも溜めた攻撃）には長め
+function parryWindow(a) { return a.chargeT > 0 ? F.PARRY_WINDOW_CHARGE : F.PARRY_WINDOW; }
 function contactX(a, d) { return d.x + d.facing * 2; } // 頭上の刀で受けた位置
 
 function doHit(a, d) {
-  const wall = d.wallBehind();
-  d.loseHP(DAMAGE.HIT_HP);
+  const k = a.chargeLv, wall = d.wallBehind(), pinned = wallPinned(d, KNOCKBACK.HIT * (1 + CHARGE.KNOCK * k));
+  d.loseHP(DAMAGE.HIT_HP * (1 + CHARGE.HP * k));
   d.setState('hitstun', F.HITSTUN); d.flash = 8; d.atkBuffer = 0;
-  knock(d, KNOCKBACK.HIT); if (wall) knock(a, KNOCKBACK.HIT * KNOCKBACK.WALL_TRANSFER);
+  knock(d, KNOCKBACK.HIT * (1 + CHARGE.KNOCK * k)); if (wall) knock(a, KNOCKBACK.HIT * KNOCKBACK.WALL_TRANSFER);
   a.stats.hits++;
-  S('hit'); G.hitstop = HITSTOP.HIT; FX.shake = Math.max(FX.shake, 3);
+  S('hit'); G.hitstop = HITSTOP.HIT + Math.round(4 * k); FX.shake = Math.max(FX.shake, 3 + 3 * k);
   const y = STAGE.GROUND_Y - 24;
-  burst(d.x, y, 16, ['#e01818', '#a00c0c', '#ff4040'], 2.6, { dir: a.facing > 0 ? -0.3 : Math.PI + 0.3, spread: 1.4, up: 0.6, life: 26 });
+  burst(d.x, y, 16 + Math.round(16 * k), ['#e01818', '#a00c0c', '#ff4040'], 2.6 + k, { dir: a.facing > 0 ? -0.3 : Math.PI + 0.3, spread: 1.4, up: 0.6, life: 26 });
   burst(d.x, y, 6, ['#ffffff', '#ffe0e0'], 2, { g: 0, life: 8 });
-  FX.slashes.push({ x: d.x, y, life: 9, dir: a.facing, red: false });
+  FX.slashes.push({ x: d.x, y, life: 9 + Math.round(5 * k), dir: a.facing, red: k >= 0.5, big: k >= 1 });
+  if (k >= 1) { S('heavy'); popup('溜め斬り', d.x, POPUP_Y(), '#ffb0a0', 20); }
   if (d.hp <= 0) { vKill(d); return; }
-  if (d.addPosture(POSTURE.HIT * (wall ? POSTURE.WALL_MULT : 1))) vBreak(d);
+  if (pinned) wallMark(d);
+  if (d.addPosture(POSTURE.HIT * (1 + CHARGE.POSTURE * k) * (pinned ? POSTURE.WALL_MULT : 1))) vBreak(d);
 }
 
 function doGuard(a, d) {
-  const wall = d.wallBehind();
-  const mult = (1 + POSTURE.GUARD_CHAIN_STEP * d.guardChain) * (wall ? POSTURE.WALL_MULT : 1);
+  const k = a.chargeLv, wall = d.wallBehind(), pinned = wallPinned(d, KNOCKBACK.GUARD * (1 + CHARGE.KNOCK * k));
+  const mult = (1 + POSTURE.GUARD_CHAIN_STEP * d.guardChain) * (pinned ? POSTURE.WALL_MULT : 1) * (1 + CHARGE.POSTURE * k);
+  if (pinned) wallMark(d);
   d.guardChain = Math.min(POSTURE.GUARD_CHAIN_MAX, d.guardChain + 1); d.chainTimer = POSTURE.GUARD_CHAIN_RESET;
   d.setState('guardstun', F.GUARDSTUN);
-  knock(d, KNOCKBACK.GUARD); if (wall) knock(a, KNOCKBACK.GUARD * KNOCKBACK.WALL_TRANSFER);
+  knock(d, KNOCKBACK.GUARD * (1 + CHARGE.KNOCK * k)); if (wall) knock(a, KNOCKBACK.GUARD * KNOCKBACK.WALL_TRANSFER);
   d.stats.guards++;
-  S('guard'); G.hitstop = HITSTOP.GUARD; FX.shake = Math.max(FX.shake, 1.5);
+  S('guard'); if (k >= 0.5) S('clang', k); G.hitstop = HITSTOP.GUARD + Math.round(3 * k); FX.shake = Math.max(FX.shake, 1.5 + 2 * k);
   const x = contactX(a, d), y = GUARD_Y();
-  burst(x, y, 8, ['#ffe9a0', '#ffffff', '#ffc860'], 1.6, { up: 0.6, life: 14 });
+  burst(x, y, 8 + Math.round(12 * k), ['#ffe9a0', '#ffffff', '#ffc860'], 1.6 + k, { up: 0.6, life: 14 });
   if (d.addPosture(POSTURE.GUARD * mult)) vBreak(d);
 }
 
@@ -824,9 +1010,13 @@ function doParry(a, d) {
   d.setState('parry', F.PARRY_STATE); d.guardMin = 0;
   knock(d, KNOCKBACK.PARRY_DEFENDER);
   d.guardChain = Math.max(0, d.guardChain - 1);
+  // 壁際の効果：弾いた側・弾かれた側とも、押し返しで壁にぶつかる距離なら体幹ダメージ1.5倍
+  const aPinned = wallPinned(a, KNOCKBACK.PARRY_ATTACKER), dPinned = wallPinned(d, KNOCKBACK.PARRY_DEFENDER);
+  if (aPinned) wallMark(a);
+  if (dPinned) wallMark(d);
   { // 弾いた側はごくわずかに体幹を削られる（これでブレイクはしない・回復も遅らせない）
     const before = d.posture;
-    d.posture = Math.min(STATS.POSTURE_MAX - 1, d.posture + POSTURE.PARRY_TO_DEFENDER);
+    d.posture = Math.min(STATS.POSTURE_MAX - 1, d.posture + POSTURE.PARRY_TO_DEFENDER * (dPinned ? POSTURE.WALL_MULT : 1));
     dmgNum(d, 'posture', d.posture - before);
   }
   d.stats.parries++;
@@ -835,8 +1025,33 @@ function doParry(a, d) {
   const x = contactX(a, d), y = GUARD_Y();
   burst(x, y, 34, ['#ffffff', '#fff2a0', '#ffd040', '#a0e0ff'], 3.6, { up: 0.6, life: 24, big: 0.4 });
   ring(x, y, '#ffffff', 3, 12); ring(x, y, '#ffe070', 1.8, 16);
-  popup('弾き！', x, y - 30, '#ffe060', 30);
-  if (a.addPosture(POSTURE.PARRY_TO_ATTACKER)) vBreak(a);
+  // 溜め斬りを弾いた＝相手の拍子を読み切った。文字を大きく、衝撃を強くし、相手の体幹を大きく削る
+  const k = a.chargeLv;
+  popup('弾き！', x, POPUP_Y(), '#ffe060', k >= 0.25 ? 34 : 30);
+  if (k >= 0.25) { G.hitstop += 4; FX.shake = Math.max(FX.shake, 4); ring(x, y, '#ffe070', 4, 18); }
+  if (a.addPosture(POSTURE.PARRY_TO_ATTACKER * (1 + CHARGE.PARRY_RISK * k) * (aPinned ? POSTURE.WALL_MULT : 1))) vBreak(a);
+}
+
+// 押し返しの初速 v で滑る距離（物理の更新と同じ計算）
+function knockTravel(v) { let t = 0; while (v >= 0.05) { t += v; v *= MOVE.FRICTION; } return t; }
+// 壁際か：壁を背負っている、またはこの押し返しで壁にぶつかる距離にいる
+function wallPinned(d, v) {
+  const room = d.facing > 0 ? d.x - STAGE.LEFT : STAGE.RIGHT - d.x;   // 背後の壁までの距離
+  return d.wallBehind() || knockTravel(v) >= room - 2;
+}
+// 壁際の効果が出たことを、侍の背後（頭の後ろ）に表示
+function wallMark(d) { popup('壁際！', d.x - d.facing * 17, STAGE.GROUND_Y - 44, '#ff8a4a', 18); }
+// 溜めの合図：刀の切っ先がきらめく（full＝溜めきった）
+function chargeGlint(f, full) {
+  const tip = bladeTip(f);
+  S(full ? 'glintFull' : 'glint');
+  burst(tip.x, tip.y, full ? 14 : 6, full ? ['#ffffff', '#fff2a0', '#a0e0ff'] : ['#ffffff', '#d0e8ff'], full ? 1.6 : 0.9, { g: 0, life: full ? 16 : 10 });
+  ring(tip.x, tip.y, full ? '#fff2a0' : '#ffffff', full ? 2.2 : 1.4, full ? 14 : 9);
+}
+// 振りかぶった刀の切っ先の位置（溜めの合図用）
+function bladeTip(f) {
+  const a = 145 * Math.PI / 180;
+  return { x: f.x + f.facing * (-2 + Math.cos(a) * 24), y: STAGE.GROUND_Y - 37 - Math.sin(a) * 24 };
 }
 
 function doClash(p, c) {
@@ -850,8 +1065,12 @@ function doClash(p, c) {
   const x = (p.x + c.x) / 2, y = CLASH_Y();
   burst(x, y, 28, ['#ff9020', '#ffd040', '#ffffff', '#ff5010'], 3.2, { up: 1, life: 26, big: 0.5 });
   ring(x, y, '#ffb040', 2.6, 14);
-  popup('相子！', x, y - 30, '#ff9a30', 30);
-  const pb = p.addPosture(POSTURE.CLASH), cb = c.addPosture(POSTURE.CLASH);
+  popup('相子！', x, POPUP_Y(), '#ff9a30', 30);
+  // 壁際の効果：押し返しで壁にぶつかる側は体幹ダメージ1.5倍
+  const pPinned = wallPinned(p, KNOCKBACK.CLASH), cPinned = wallPinned(c, KNOCKBACK.CLASH);
+  if (pPinned) wallMark(p);
+  if (cPinned) wallMark(c);
+  const pb = p.addPosture(POSTURE.CLASH * (pPinned ? POSTURE.WALL_MULT : 1)), cb = c.addPosture(POSTURE.CLASH * (cPinned ? POSTURE.WALL_MULT : 1));
   if (pb) vBreak(p);
   if (cb) vBreak(c);
 }
@@ -863,11 +1082,11 @@ function breakPosture(f) {
   FX.flash = Math.max(FX.flash, 0.3); FX.flashColor = '#ff6060';
   ring(f.x, STAGE.GROUND_Y - 26, '#ff3030', 2.4, 18);
   burst(f.x, STAGE.GROUND_Y - 30, 14, ['#ff3030', '#ffa0a0'], 2, { g: 0.05, life: 30 });
-  popup('体幹崩し！', f.x, STAGE.GROUND_Y - 64, '#ff4040', 26);
+  popup('体幹崩し！', f.x, POPUP_Y() + 13, '#ff4040', 26);
 }
 
 function doDeathblow(a, d) {
-  d.loseHP(DAMAGE.DEATHBLOW_HP);
+  d.loseHP(lerp(DAMAGE.DEATHBLOW_MIN, DAMAGE.DEATHBLOW_MAX, a.chargeLv));   // 溜めた長さに比例して 30 → 50
   d.posture = 0; d.postureView = 0; d.flash = 18; d.regenDelay = 0;
   a.stats.deathblows++;
   if (d.wallBehind()) knock(a, KNOCKBACK.HIT * KNOCKBACK.WALL_TRANSFER);
@@ -929,13 +1148,15 @@ const BG_THEMES = {
 };
 
 function buildBG(T) {
+  // 240×135 の画面に合わせた配置（左に城、右に太陽。地面は GROUND_Y の少し上から）
   const c = document.createElement('canvas'); c.width = SCREEN.W; c.height = SCREEN.H;
   const g = c.getContext('2d'), W = SCREEN.W, H = SCREEN.H;
   const px = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
   let seed = 7; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const gTop = STAGE.GROUND_Y - 16;   // 石畳の奥の端（＝塀の足元）
 
   // 空（段階的な色帯＋ディザ＝SFC風グラデーション）
-  const sky = T.sky, bh = 10;
+  const sky = T.sky, bh = 8;
   sky.forEach((col, i) => px(0, i * bh, W, bh, col));
   px(0, sky.length * bh, W, H - sky.length * bh, sky[sky.length - 1]);
   for (let i = 1; i < sky.length; i++) {
@@ -946,13 +1167,13 @@ function buildBG(T) {
     g.fillStyle = sky[i];
     for (let x = 0; x < W; x += 4) g.fillRect(x + 3, y - 1, 1, 1);
   }
-  for (let i = 0; i < T.stars; i++) px(rnd() * W | 0, rnd() * (T.glow ? 22 : 36) | 0, 1, 1, rnd() < 0.3 ? T.starCols[0] : T.starCols[1]);
+  for (let i = 0; i < T.stars; i++) px(rnd() * W | 0, rnd() * (T.glow ? 16 : 28) | 0, 1, 1, rnd() < 0.3 ? T.starCols[0] : T.starCols[1]);
 
-  // 太陽（位置は共通）
-  const sx = 238, sy = 84, sr = 26;
+  // 太陽（右寄り。山の稜線に下半分がかかる）
+  const sx = 172, sy = 50, sr = 22;
   if (T.glow) { // 朝日の光輪（ディザで外側ほど薄く）
     T.glow.forEach((col, k) => {
-      const r = sr + 12 - k * 6;
+      const r = sr + 10 - k * 5;
       for (let y = -r; y <= r; y++) {
         const hw = Math.floor(Math.sqrt(r * r - y * y));
         for (let x = -hw; x <= hw; x++) if (k === 1 || ((x + y) & 1) === 0) px(sx + x, sy + y, 1, 1, col);
@@ -961,7 +1182,7 @@ function buildBG(T) {
     // 放射状の光の筋
     for (let a = 0; a < 16; a++) {
       const ang = a / 16 * Math.PI * 2;
-      for (let d = sr + 14; d < sr + 30; d += 2) px(Math.round(sx + Math.cos(ang) * d), Math.round(sy + Math.sin(ang) * d), 1, 1, T.glow[0]);
+      for (let d = sr + 12; d < sr + 26; d += 2) px(Math.round(sx + Math.cos(ang) * d), Math.round(sy + Math.sin(ang) * d), 1, 1, T.glow[0]);
     }
   }
   for (let y = -sr; y <= sr; y++) {
@@ -969,7 +1190,7 @@ function buildBG(T) {
     px(sx - hw, sy + y, hw * 2 + 1, 1, t < 0.3 ? T.sun[0] : t < 0.55 ? T.sun[1] : t < 0.8 ? T.sun[2] : T.sun[3]);
   }
   const skyAt = y => sky[Math.min(sky.length - 1, Math.floor(y / bh))];
-  [[5, 1], [10, 1], [14, 2], [18, 2], [22, 3]].forEach(([dy, h]) => px(sx - sr, sy + dy, sr * 2 + 1, h, T.glow ? T.glow[0] : skyAt(sy + dy)));
+  [[4, 1], [8, 1], [12, 2], [15, 2], [19, 2]].forEach(([dy, h]) => px(sx - sr, sy + dy, sr * 2 + 1, h, T.glow ? T.glow[0] : skyAt(sy + dy)));
 
   // 雲（朝は下側が朝日に照らされる）
   const cloud = (x, y, w, col) => {
@@ -977,17 +1198,17 @@ function buildBG(T) {
     if (T.cloudLit) px(x + 3, y + 1, w - 6, 1, T.cloudLit);
   };
   const cl = T.clouds;
-  cloud(26, 42, 64, cl[0]); cloud(150, 26, 46, cl[1]); cloud(196, 64, 76, cl[2]); cloud(84, 72, 52, cl[3]); cloud(250, 46, 40, cl[4]);
+  cloud(24, 32, 50, cl[0]); cloud(104, 22, 38, cl[1]); cloud(148, 56, 58, cl[2]); cloud(66, 52, 42, cl[3]); cloud(194, 34, 32, cl[4]);
 
   // 遠景の山
-  const h1 = x => Math.round(97 + 9 * Math.sin(x * 0.028 + 0.5) + 6 * Math.sin(x * 0.067 + 2) + 3 * Math.sin(x * 0.19));
+  const h1 = x => Math.round(60 + 7 * Math.sin(x * 0.037 + 0.5) + 5 * Math.sin(x * 0.089 + 2) + 2 * Math.sin(x * 0.25));
   for (let x = 0; x < W; x++) { px(x, h1(x), 1, H, T.mtFar); px(x, h1(x), 1, 1, T.mtFarRim); }
-  const h2 = x => Math.round(117 + 7 * Math.sin(x * 0.041 + 1.3) + 4 * Math.sin(x * 0.13 + 0.4));
+  const h2 = x => Math.round(76 + 5 * Math.sin(x * 0.055 + 1.3) + 3 * Math.sin(x * 0.17 + 0.4));
   for (let x = 0; x < W; x++) px(x, h2(x), 1, H, T.mtMid);
 
-  // 城
+  // 城（左寄り）
   const [cBase, cBody, cRoof] = T.castle;
-  const kx = 74, kb = h2(74) + 2;
+  const kx = 60, kb = h2(kx) + 2;
   px(kx - 14, kb - 6, 28, 9, cBase);
   px(kx - 11, kb - 14, 22, 8, cBody); px(kx - 15, kb - 15, 30, 2, cRoof); px(kx - 16, kb - 16, 2, 1, cRoof); px(kx + 14, kb - 16, 2, 1, cRoof);
   px(kx - 8, kb - 22, 16, 7, cBody); px(kx - 12, kb - 23, 24, 2, cRoof); px(kx - 13, kb - 24, 2, 1, cRoof); px(kx + 11, kb - 24, 2, 1, cRoof);
@@ -996,21 +1217,21 @@ function buildBG(T) {
   [[-7, -11], [4, -11], [-3, -19], [2, -19], [-1, -27]].forEach(([dx, dy]) => px(kx + dx, kb + dy, 2, 2, T.windows));
 
   // 近景の木々
-  const h3 = x => Math.round(133 + 3 * Math.sin(x * 0.31) + 2 * Math.sin(x * 0.83 + 1));
+  const h3 = x => Math.round(gTop - 9 + 2 * Math.sin(x * 0.41) + 2 * Math.sin(x * 1.1 + 1));
   for (let x = 0; x < W; x++) px(x, h3(x), 1, H, T.trees);
   const pine = (x, y, s) => {
     px(x, y, 2, 10 * s, T.pine[0]);
     for (let i = 0; i < 3; i++) { const w = (10 - i * 3) * s, yy = y - i * 5 * s; px(x + 1 - w / 2 | 0, yy, w | 0, 3 * s, T.pine[1]); }
   };
-  pine(128, 120, 1); pine(176, 116, 1.2); pine(272, 122, 0.9); pine(36, 124, 0.8);
+  pine(98, gTop - 22, 1); pine(134, gTop - 26, 1.2); pine(198, gTop - 20, 0.9); pine(34, gTop - 18, 0.8);
 
   // 塀（奥）
-  const gTop = 142, fe = T.fence;
+  const fe = T.fence;
   px(0, gTop - 7, W, 7, fe[0]); px(0, gTop - 10, W, 3, fe[1]); px(0, gTop - 11, W, 1, fe[2]);
   for (let x = 6; x < W; x += 24) px(x, gTop - 7, 2, 7, fe[3]);
 
-  // 地面（石畳）
-  const gr = T.ground, rows = [gTop, 145, 149, 154, 160, 167, 175, H];
+  // 地面（石畳。奥ほど目地が細かい）
+  const gr = T.ground, rows = [0, 3, 7, 12, 18, 25, 33].map(d => gTop + d).concat([H]);
   for (let i = 0; i < rows.length - 1; i++) {
     const y0 = rows[i], y1 = rows[i + 1];
     px(0, y0, W, y1 - y0, i % 2 ? gr[1] : gr[0]);
@@ -1018,25 +1239,26 @@ function buildBG(T) {
     const sp = 10 + i * 7, off = (i % 2) * (sp / 2) | 0;
     for (let x = off; x < W; x += sp) px(x, y0, 1, y1 - y0, gr[2]);
   }
-  for (let i = 0; i < 140; i++) px(rnd() * W | 0, gTop + rnd() * (H - gTop) | 0, 1, 1, rnd() < 0.5 ? gr[5] : gr[6]);
+  for (let i = 0; i < 80; i++) px(rnd() * W | 0, gTop + rnd() * (H - gTop) | 0, 1, 1, rnd() < 0.5 ? gr[5] : gr[6]);
 
-  // 左右の壁（画面端）
+  // 左右の壁（画面端）：屋根はゲージのすぐ下、石垣は塀の高さから
+  const top = 32, stoneY = gTop - 18, ly = 40;
   const wall = (x0, dir) => {
-    px(x0, 30, 18, H - 30, T.wood[0]);
-    for (let x = 0; x < 18; x += 4) px(x0 + x, 30, 1, H - 30, T.wood[1]);
-    px(dir > 0 ? x0 + 17 : x0, 30, 1, H - 30, T.wood[2]);
-    px(x0 - 2, 24, 22, 5, T.roof[0]); px(x0 - 2, 23, 22, 1, T.roof[1]); px(x0 - 2, 29, 22, 1, T.roof[2]);
-    px(x0, 124, 18, H - 124, T.stone[0]);
-    for (let y = 124, r = 0; y < H; y += 6, r++) {
+    px(x0, top, 18, H - top, T.wood[0]);
+    for (let x = 0; x < 18; x += 4) px(x0 + x, top, 1, H - top, T.wood[1]);
+    px(dir > 0 ? x0 + 17 : x0, top, 1, H - top, T.wood[2]);
+    px(x0 - 2, top - 6, 22, 5, T.roof[0]); px(x0 - 2, top - 7, 22, 1, T.roof[1]); px(x0 - 2, top - 1, 22, 1, T.roof[2]);
+    px(x0, stoneY, 18, H - stoneY, T.stone[0]);
+    for (let y = stoneY, r = 0; y < H; y += 6, r++) {
       px(x0, y, 18, 1, T.stone[1]);
       for (let x = (r % 2) * 4; x < 18; x += 8) px(x0 + x, y, 1, 6, T.stone[1]);
     }
-    px(dir > 0 ? x0 + 17 : x0, 124, 1, H - 124, T.stone[2]);
+    px(dir > 0 ? x0 + 17 : x0, stoneY, 1, H - stoneY, T.stone[2]);
     const lx = x0 + 9, L = T.lantern || { glow: null, body: '#8a5a44', inner: '#b88a68', band: '#6a4232' };
-    if (L.glow) { g.fillStyle = L.glow; g.fillRect(lx - 8, 70, 17, 26); }
-    px(lx, 72, 1, 4, '#1a1008');
-    px(lx - 3, 76, 7, 2, '#2a1a10'); px(lx - 3, 78, 7, 10, L.body); px(lx - 2, 79, 5, 8, L.inner); px(lx - 3, 88, 7, 2, '#2a1a10');
-    px(lx - 3, 82, 7, 1, L.band);
+    if (L.glow) { g.fillStyle = L.glow; g.fillRect(lx - 8, ly - 2, 17, 26); }
+    px(lx, ly, 1, 4, '#1a1008');
+    px(lx - 3, ly + 4, 7, 2, '#2a1a10'); px(lx - 3, ly + 6, 7, 10, L.body); px(lx - 2, ly + 7, 5, 8, L.inner); px(lx - 3, ly + 16, 7, 2, '#2a1a10');
+    px(lx - 3, ly + 10, 7, 1, L.band);
   };
   wall(0, 1); wall(W - 18, -1);
   return c;
@@ -1072,7 +1294,10 @@ function getPose(f) {
     }
     case 'attack': {
       const t = f.timer;
-      if (t < F.ATK_STARTUP) { // 振りかぶり
+      if (f.charging) { // 溜め：振りかぶりきった上段の構えのまま止まる（刀身を光が走る）
+        P.hx = -2; P.hy = -37; P.ang = 145; P.ox = -1; P.fl = -1;
+        P.charge = Math.min(1, f.chargeT / F.CHARGE_FULL); P.full = f.chargeT >= F.CHARGE_FULL;
+      } else if (t < F.ATK_STARTUP) { // 振りかぶり
         const k = Math.min(1, t / (F.ATK_STARTUP * 0.7));
         P.hx = lerp(6, -2, k); P.hy = lerp(-21, -37, k); P.ang = lerp(28, 145, k); P.ox = -Math.round(k); P.fl = -1;
       } else if (t < F.ATK_STARTUP + F.ATK_ACTIVE) { // 斬り下ろし
@@ -1194,6 +1419,14 @@ function drawFighter(f) {
     // 手前の腕
     L(1 + ox, ty + 3, hand.x, hand.y, pal.kim, 3);
     R(Math.round(hand.x) - 1, Math.round(hand.y) - 1, 3, 2, pal.skin);
+    if (pose.charge !== undefined) {
+      // 溜め：刃を光が走る（溜まるほど速く・多く。溜めきると光が金色を帯びる）
+      const n = 3 + Math.round(pose.charge * 6), sp = 1 + pose.charge * 2;
+      for (let i = 0; i < n; i++) {
+        const d = 4 + ((G.time * sp + i * 20 / n * 1.0) % 20);
+        R(Math.round(hand.x + dx * d), Math.round(hand.y + dy * d), 1, 1, pose.full ? '#fff6c0' : '#ffffff');
+      }
+    }
   }
 
   // 斬撃の軌跡
@@ -1249,10 +1482,10 @@ function drawHUDLow() {
   const restTrail = f => 1 - f.postureView / STATS.POSTURE_MAX;
   const pcol = f => f.state === 'broken' ? ((G.time >> 2) % 2 ? '#ff2020' : '#5a0a0a')
     : (rest(f) < 0.25 && (G.time >> 3) % 2 === 0) ? '#ff6050' : '#d82020';
-  drawBar(12, 13, 116, 6, p.hp / STATS.HP_MAX, p.hpView / STATS.HP_MAX, '#f2cf2a', '#fff3a0', '#3b2c0a', false);
-  drawBar(12, 23, 90, 4, rest(p), restTrail(p), pcol(p), '#ff9a8a', '#2a0808', false);
-  drawBar(192, 13, 116, 6, c.hp / STATS.HP_MAX, c.hpView / STATS.HP_MAX, '#f2cf2a', '#fff3a0', '#3b2c0a', true);
-  drawBar(218, 23, 90, 4, rest(c), restTrail(c), pcol(c), '#ff9a8a', '#2a0808', true);
+  drawBar(8, 10, 88, 5, p.hp / STATS.HP_MAX, p.hpView / STATS.HP_MAX, '#f2cf2a', '#fff3a0', '#3b2c0a', false);
+  drawBar(8, 19, 68, 3, rest(p), restTrail(p), pcol(p), '#ff9a8a', '#2a0808', false);
+  drawBar(144, 10, 88, 5, c.hp / STATS.HP_MAX, c.hpView / STATS.HP_MAX, '#f2cf2a', '#fff3a0', '#3b2c0a', true);
+  drawBar(164, 19, 68, 3, rest(c), restTrail(c), pcol(c), '#ff9a8a', '#2a0808', true);
 }
 // ゲージ横に減少量「－◯◯」を描く（メインキャンバス）
 function renderDamageNumbers() {
@@ -1262,9 +1495,9 @@ function renderDamageNumbers() {
     if (n <= 0) continue;
     const left = d.f.isPlayer, hp = d.kind === 'hp';
     // 体力：体力ゲージ内側の端の上 / 体幹：「体幹」ラベルの横
-    const x = (left ? (hp ? 128 : 120) : (hp ? 192 : 200)) * K;
-    const y = (hp ? 6 : 25) * K + (DMG_NUM_LIFE - d.life) * 0.08;
-    const size = Math.round((hp ? 20 : 18) * (1 + d.pop * 0.04));
+    const x = (left ? (hp ? 96 : 88) : (hp ? 144 : 152)) * K;
+    const y = (hp ? 4.5 : 21) * K + (DMG_NUM_LIFE - d.life) * 0.08;
+    const size = Math.round((hp ? 24 : 21) * (1 + d.pop * 0.04));
     ctx.globalAlpha = Math.min(1, d.life / 20);
     txt('－' + n, x, y, size, hp ? '#ffe060' : '#ff7a6a', hp ? (left ? 'right' : 'left') : (left ? 'left' : 'right'));
     ctx.globalAlpha = 1;
@@ -1278,7 +1511,7 @@ function txt(s, x, y, size, color, align = 'center', font = FONT_SANS, stroke = 
 }
 
 // タイトル用の侍
-const demo = { p: new Fighter(true, 70, PAL_P, ''), c: new Fighter(false, 250, stagePal(STAGES.length - 1), '') };
+const demo = { p: new Fighter(true, 52, PAL_P, ''), c: new Fighter(false, 188, stagePal(STAGES.length - 1), '') };
 demo.p.facing = 1; demo.c.facing = -1; demo.p.state = 'guard';
 
 function render() {
@@ -1315,30 +1548,30 @@ function render() {
   // 名前・何戦目か
   if (G.net) {
     const left = netMeLeft();
-    txt(left ? 'あなた' : '相手', 12 * K, 6 * K, 17, left ? '#ffffff' : '#d8c8c8', 'left');
-    txt(left ? '相手' : 'あなた', 308 * K, 6 * K, 17, left ? '#d8c8c8' : '#ffffff', 'right');
-    txt(`フレンド対戦　${G.net.round}戦目`, 160 * K, 6 * K, 17, '#f3d27a', 'center', FONT_SERIF);
-    txt('体力', 131 * K, 16 * K, 12, '#f2cf2a', 'left'); txt('体幹', 105 * K, 25 * K, 12, '#ff7060', 'left');
-    txt('体力', 189 * K, 16 * K, 12, '#f2cf2a', 'right'); txt('体幹', 215 * K, 25 * K, 12, '#ff7060', 'right');
+    txt(left ? 'あなた' : '相手', 8 * K, 4.5 * K, 18, left ? '#ffffff' : '#d8c8c8', 'left');
+    txt(left ? '相手' : 'あなた', 232 * K, 4.5 * K, 18, left ? '#d8c8c8' : '#ffffff', 'right');
+    txt(`フレンド対戦　${G.net.round}戦目`, 120 * K, 4.5 * K, 18, '#f3d27a', 'center', FONT_SERIF);
+    txt('体力', 99 * K, 12.5 * K, 14, '#f2cf2a', 'left'); txt('体幹', 79 * K, 20.5 * K, 14, '#ff7060', 'left');
+    txt('体力', 141 * K, 12.5 * K, 14, '#f2cf2a', 'right'); txt('体幹', 161 * K, 20.5 * K, 14, '#ff7060', 'right');
     // 開始演出中は自分の侍の頭上に「あなた」と表示（再戦ごとに左右が入れ替わるため）
     if (G.mode === 'intro' || (G.mode === 'fight' && G.frame < 90)) {
       const me = netMe();
-      txt('▼ あなた', me.x * K, (STAGE.GROUND_Y - 62) * K, 15, '#ffe680');
+      txt('▼ あなた', me.x * K, (STAGE.GROUND_Y - 62) * K, 19, '#ffe680');
     }
   } else if (G.mode !== 'ending') {
     const st = STAGES[G.stage];
-    txt('あなた', 12 * K, 6 * K, 17, '#ffffff', 'left');
-    txt(st.title, 308 * K, 6 * K, 17, '#ffffff', 'right');
-    txt(`第${KANSUJI[G.stage]}戦`, 160 * K, 6 * K, 17, '#f3d27a', 'center', FONT_SERIF);
-    txt('体力', 131 * K, 16 * K, 12, '#f2cf2a', 'left'); txt('体幹', 105 * K, 25 * K, 12, '#ff7060', 'left');
-    txt('体力', 189 * K, 16 * K, 12, '#f2cf2a', 'right'); txt('体幹', 215 * K, 25 * K, 12, '#ff7060', 'right');
+    txt('あなた', 8 * K, 4.5 * K, 18, '#ffffff', 'left');
+    txt(st.title, 232 * K, 4.5 * K, 18, '#ffffff', 'right');
+    txt(`第${KANSUJI[G.stage]}戦`, 120 * K, 4.5 * K, 18, '#f3d27a', 'center', FONT_SERIF);
+    txt('体力', 99 * K, 12.5 * K, 14, '#f2cf2a', 'left'); txt('体幹', 79 * K, 20.5 * K, 14, '#ff7060', 'left');
+    txt('体力', 141 * K, 12.5 * K, 14, '#f2cf2a', 'right'); txt('体幹', 161 * K, 20.5 * K, 14, '#ff7060', 'right');
   }
   renderDamageNumbers();
   // ポップアップ
   for (const t of FX.texts) {
     ctx.globalAlpha = Math.min(1, t.life / 15);
     const pop = t.life > t.max - 6 ? 1 + (t.life - (t.max - 6)) * 0.08 : 1;
-    txt(t.s, t.x * K, t.y * K, Math.round(t.size * pop), t.color, 'center', FONT_SERIF);
+    txt(t.s, t.x * K, t.y * K, Math.round(t.size * POPUP_SCALE * pop), t.color, 'center', FONT_SERIF);
     ctx.globalAlpha = 1;
   }
   if (FX.big) {
@@ -1357,7 +1590,7 @@ function render() {
   }
   if (G.net) renderNetStatus();
   if (G.mode === 'fight' && !TOUCH.on) {
-    txt(G.net ? 'Z:攻撃  X:ガード（直前で弾き）  Esc:退出' : 'Z:攻撃  X:ガード（直前で弾き）  P:一時停止  Esc:タイトル',
+    txt(G.net ? 'Z:攻撃（長押しで溜め）  X:ガード（直前で弾き）  Esc:退出' : 'Z:攻撃（長押しで溜め）  X:ガード（直前で弾き）  P:一時停止  Esc:タイトル',
       cv.width - 10, cv.height - 12, 13, 'rgba(255,255,255,0.75)', 'right');
   }
   // タッチ：画面上部中央に「一時停止」（一人用）／「メニュー」（対戦）ボタン
@@ -1483,7 +1716,7 @@ function renderTitleText() {
   });
   txt(TITLE_MENU[G.sel].desc, W / 2, 366, 17, '#f3e6c0');
   ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 404, W, 136);
-  txt('← → : 前進・後退　　Z : 攻撃　　X : ガード（攻撃が当たる直前に押すと「弾き（パリィ）」）', W / 2, 434, 18, '#ffffff');
+  txt('← → : 前進・後退　　Z : 攻撃（長押しで溜め斬り）　　X : ガード（当たる直前に押すと「弾き」）', W / 2, 434, 18, '#ffffff');
   txt('黄ゲージ＝体力　赤ゲージ＝体幹（0で体幹崩し → 致命の一撃のチャンス）', W / 2, 468, 16, '#e8d8b0');
   if ((G.time >> 5) % 2 === 0) txt('↑↓ で選び、Z / Enter で決定', W / 2, 512, 22, '#f3d27a');
 }
@@ -1498,7 +1731,7 @@ function renderTitleTouch() {
   });
   ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 404, W, 136);
   txt('左側の ◀ ▶：前進・後退　　右側の［攻撃］［ガード］：斬る・受ける', W / 2, 432, 19, '#ffffff');
-  txt('ガードは、攻撃が当たる直前に押すと「弾き（パリィ）」になる', W / 2, 466, 17, '#e8d8b0');
+  txt('ガードは当たる直前に押すと「弾き」　攻撃は長押しで「溜め斬り」', W / 2, 466, 17, '#e8d8b0');
   txt('黄ゲージ＝体力　赤ゲージ＝体幹（0で体幹崩し → 致命の一撃のチャンス）', W / 2, 500, 16, '#c8b8a0');
   if (canFullscreen()) tbtn('fs', '全画面', W - 80, 36, 130, 46, goFullscreen, { size: 20, font: FONT_SANS });
 }
@@ -1587,7 +1820,7 @@ function renderNetStatus() {
   const col = !ms ? '#c8c8c8' : ms < 80 ? '#90e090' : ms < 160 ? '#f0d070' : '#ff8070';
   const route = n.route === 'direct' ? '・直結' : n.route === 'relay' ? '・中継' : '';
   txt(`通信 ${ms ? ms + 'ms' : '—'}${route}`, 10, cv.height - 12, 13, col, 'left');
-  if (n.stallT > 20) txt('相手の通信を待っています…', cv.width / 2, 120 * K, 22, '#ffe680', 'center', FONT_SERIF);
+  if (n.stallT > 20) txt('相手の通信を待っています…', cv.width / 2, 90 * K, 22, '#ffe680', 'center', FONT_SERIF);
   else if (n.inMatch && G.mode === 'fight' && n.simF - n.lastRemote > NET.LATE_NOTICE) {
     // 止めずに動き続けている間の、控えめなお知らせ（右下）
     txt('相手の通信が遅れています', cv.width - 10, cv.height - 32, 14, '#ffd080', 'right');
@@ -1610,8 +1843,6 @@ function newMatch() {
   G.p = new Fighter(true, MOVE.START_P, PAL_P, 'あなた');
   G.c = new Fighter(false, MOVE.START_C, stagePal(G.stage), st.title);
   G.ai = new AI(st.ai);
-  G.c.postureTaken = st.ai.postureTaken || 1;
-  G.c.hpTaken = st.ai.hpTaken || 1;
   G.frame = 0; G.hitstop = 0; G.slow = 0; G.paused = false; G.winner = null;
   G.mode = 'stage'; G.stageT = 0; G.introT = 0;
   clearFX();
@@ -1626,6 +1857,7 @@ function toTitle() { G.mode = 'title'; G.paused = false; G.leaveAsk = false; cle
 function cpuFeed() {
   G.p.input.dir = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0);
   G.p.input.guard = !!keys.KeyX;
+  G.p.input.atk = !!keys.KeyZ;
   G.ai.think(G.c, G.frame);
 }
 // 1フレーム分の戦闘処理。feed は入力を設定する関数（オンライン対戦では事前に設定済みなので null）
@@ -1636,7 +1868,7 @@ function fightStep(active, feed = cpuFeed) {
   if (active) {
     if (feed) feed();
   } else {
-    p.input = { dir: 0, guard: false }; c.input = { dir: 0, guard: false };
+    p.input = { dir: 0, guard: false, atk: false }; c.input = { dir: 0, guard: false, atk: false };
     p.tapAtk = p.tapGuard = c.tapAtk = c.tapGuard = false;
   }
   p.update(c, G.frame);
@@ -1743,7 +1975,7 @@ function tick() {
      実際の入力が届いて予測が外れていたら、そのフレームまで巻き戻して計算し直す
    ===================================================================== */
 const NET = {
-  VERSION: 5,               // 通信の取り決めの版（違う版同士はつながない）
+  VERSION: 8,               // 通信の取り決めの版（違う版同士はつながない）
   INPUT_DELAY: 0,           // 入力遅延（フレーム）：0＝自分の入力はオフラインと同じく即座に反映。
                             //   相手の入力の遅れはすべて予測と巻き戻しで吸収する（1〜2フレームの巻き戻しが増えるが目には見えにくい）。
                             //   相手のワープが気になる場合は 1〜2 にすると、操作が少し遅れる代わりに巻き戻しが減る
@@ -1767,7 +1999,8 @@ const NET = {
   CONNECT_TIMEOUT: 15000,   // 接続を諦めるまで（ミリ秒）
   SILENCE_TIMEOUT: 12000,   // 対戦中、相手から何も届かなければ切断とみなす（ミリ秒）
 };
-const IN_L = 1, IN_R = 2, IN_G = 4, IN_ATK = 8, IN_GTAP = 16; // 入力をビットで表す
+const IN_L = 1, IN_R = 2, IN_G = 4, IN_ATK = 8, IN_GTAP = 16, IN_A = 32; // 入力をビットで表す（IN_A＝攻撃を押し続けている＝溜め）
+const IN_HOLD = IN_L | IN_R | IN_G | IN_A;                                 // 押しっぱなしの入力（予測で継続してよいもの）
 
 const TITLE_MENU = [
   { id: 'cpu',  label: '一人で遊ぶ　六番勝負',     desc: '六人の剣客を順に破り、天下無双の座を目指せ。' },
@@ -1778,15 +2011,16 @@ const TITLE_MENU = [
 // ---- 試合状態の保存と復元（巻き戻し用） ----
 const FKEYS = ['x', 'vx', 'facing', 'hp', 'posture', 'state', 'timer', 'dur', 'tapAtk', 'tapGuard', 'parryIntent',
   'atkBuffer', 'atkHit', 'atkId', 'atkStartFrame', 'guardPressFrame', 'lastGuardPress', 'parryEligible', 'guardMin',
-  'guardChain', 'chainTimer', 'regenDelay', 'walkCycle', 'moveDir', 'postureTaken', 'hpTaken'];
+  'guardChain', 'chainTimer', 'regenDelay', 'walkCycle', 'moveDir',
+  'charging', 'chargeT', 'chargeLv', 'chargeStart'];
 function snapF(f) {
   const o = {}; for (const k of FKEYS) o[k] = f[k];
-  o.input = { dir: f.input.dir, guard: f.input.guard }; o.stats = Object.assign({}, f.stats);
+  o.input = { dir: f.input.dir, guard: f.input.guard, atk: f.input.atk }; o.stats = Object.assign({}, f.stats);
   return o;
 }
 function loadF(f, o) {
   for (const k of FKEYS) f[k] = o[k];
-  f.input = { dir: o.input.dir, guard: o.input.guard }; f.stats = Object.assign({}, o.stats);
+  f.input = { dir: o.input.dir, guard: o.input.guard, atk: o.input.atk }; f.stats = Object.assign({}, o.stats);
 }
 function saveState() {
   return { p: snapF(G.p), c: snapF(G.c), frame: G.frame, hitstop: G.hitstop, slow: G.slow, mode: G.mode,
@@ -1807,6 +2041,7 @@ function stateSum(s) { // 同期確認用の簡単なハッシュ
 function applyBits(f, b) {
   f.input.dir = (b & IN_R ? 1 : 0) - (b & IN_L ? 1 : 0);
   f.input.guard = !!(b & IN_G);
+  f.input.atk = !!(b & IN_A);
   if (b & IN_ATK) f.tapAtk = true;
   if (b & IN_GTAP) f.tapGuard = true;
 }
@@ -2024,7 +2259,7 @@ function netSendInputs(ahead) {
 // 相手の入力の予測：最後に届いた入力の「押しっぱなし」部分を継続（押した瞬間の入力は予測しない）
 function netPredict() {
   const n = G.net, last = n.remoteIn.get(n.lastRemote) || 0;
-  return last & (IN_L | IN_R | IN_G);
+  return last & IN_HOLD;
 }
 
 // ---- 左右の割り当て：1戦目はホストが左。再戦のたびに必ず入れ替わる ----
@@ -2066,6 +2301,7 @@ function sampleLocal() {
   if (keys.ArrowLeft) b |= IN_L;
   if (keys.ArrowRight) b |= IN_R;
   if (keys.KeyX) b |= IN_G;
+  if (keys.KeyZ) b |= IN_A;
   if (n.pendAtk) b |= IN_ATK;
   if (n.pendGuard) b |= IN_GTAP;
   n.pendAtk = n.pendGuard = false;
@@ -2121,7 +2357,7 @@ function netTick(any) {
   // 5. 自分の入力を採取して送り、1フレーム進める（追いつく場合はもう1フレーム）
   const b = sampleLocal();
   netAdvance(b);
-  if (extra) netAdvance(b & (IN_L | IN_R | IN_G));            // 余分のフレームでは押しっぱなしの入力だけを続ける
+  if (extra) netAdvance(b & IN_HOLD);            // 余分のフレームでは押しっぱなしの入力だけを続ける
   netSendInputs(ahead);
 
   // 6. 同期ずれの確認（両者の入力が確定したフレームの状態を比べる）
